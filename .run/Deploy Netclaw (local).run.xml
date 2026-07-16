@@ -1,0 +1,15 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="Deploy Netclaw (local)" type="ShConfigurationType" factoryName="Shell Script">
+    <option name="SCRIPT_TEXT" value="" />
+    <option name="INDEPENDENT_SCRIPT_PATH" value="true" />
+    <option name="SCRIPT_PATH" value="C:\Users\MATTBR~1\RiderProjects\netclaw\scripts\deploy-local.ps1" />
+    <option name="SCRIPT_OPTIONS" value="" />
+    <option name="INDEPENDENT_INTERPRETER_PATH" value="true" />
+    <option name="INTERPRETER_PATH" value="C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" />
+    <option name="INTERPRETER_OPTIONS" value="-NoProfile -ExecutionPolicy Bypass -File" />
+    <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$" />
+    <option name="PASS_PARENT_ENVS_2" value="true" />
+    <envs />
+    <method v="2" />
+  </configuration>
+</component>
