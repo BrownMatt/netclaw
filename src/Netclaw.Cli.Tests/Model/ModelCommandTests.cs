@@ -1,4 +1,4 @@
-﻿// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
 // <copyright file="ModelCommandTests.cs" company="Petabridge, LLC">
 //      Copyright (C) 2026 - 2026 Petabridge, LLC <https://petabridge.com>
 // </copyright>
@@ -12,6 +12,7 @@ using Xunit;
 
 namespace Netclaw.Cli.Tests.Model;
 
+[Collection(Netclaw.Cli.Tests.LegacyModelEnvironmentCollection.Name)]
 public sealed class ModelCommandTests : IDisposable
 {
     private readonly DisposableTempDir _dir = new();
@@ -96,7 +97,7 @@ public sealed class ModelCommandTests : IDisposable
     }
 
     [Fact]
-    public async Task Set_OpenAiOAuthModel_StoresLiveDiscoveredMetadata()
+    public async Task Set_OpenAiOAuthModel_DoesNotPersistDiscoveredCapabilities()
     {
         WriteConfig(new Dictionary<string, object>
         {
@@ -129,9 +130,9 @@ public sealed class ModelCommandTests : IDisposable
         var config = ReadConfigFile(_paths.NetclawConfigPath);
         var main = ReadActiveModel(config, "Main");
         Assert.Equal("Live", main.GetProperty("Provenance").GetString());
-        Assert.Equal(512000, main.GetProperty("ContextWindow").GetInt32());
-        Assert.Equal("Text, Image", main.GetProperty("InputModalities").GetString());
-        Assert.Equal("Text", main.GetProperty("OutputModalities").GetString());
+        Assert.False(main.TryGetProperty("ContextWindow", out _));
+        Assert.False(main.TryGetProperty("InputModalities", out _));
+        Assert.False(main.TryGetProperty("OutputModalities", out _));
     }
 
     [Fact]
@@ -439,6 +440,11 @@ public sealed class ModelCommandTests : IDisposable
     [InlineData("--input-modalities requires a value", "--input-modalities")]
     [InlineData("unknown argument '--input-modalites'", "--input-modalites", "Text")]
     [InlineData("invalid modalities", "--input-modalities", "3")]
+    [InlineData("invalid modalities", "--input-modalities", "1")]
+    [InlineData("invalid modalities", "--input-modalities", "2")]
+    [InlineData("invalid modalities", "--input-modalities", "4")]
+    [InlineData("invalid modalities", "--input-modalities", "8")]
+    [InlineData("invalid modalities", "--output-modalities", "1")]
     [InlineData("cannot be combined", "--context-window", "32768", "--clear-context-window")]
     public async Task Set_InvalidOptions_ReturnErrorWithoutWriting(
         string expectedError,
@@ -471,6 +477,33 @@ public sealed class ModelCommandTests : IDisposable
         var main = ReadActiveModel(config, "Main");
         Assert.Equal("Text, Image", main.GetProperty("InputModalities").GetString());
         Assert.Equal(65536, main.GetProperty("ContextWindow").GetInt32());
+    }
+
+    [Theory]
+    [InlineData("ContextWindow", "65536")]
+    [InlineData("InputModalities", "Text, Image")]
+    [InlineData("OutputModalities", "Text, Audio")]
+    public async Task Set_SameModelWithoutCapabilityOptions_PreservesStoredCapability(
+        string propertyName,
+        string expectedValue)
+    {
+        WriteConfig(WithMainEntry(new Dictionary<string, object>
+        {
+            ["Provider"] = "my-ollama",
+            ["ModelId"] = "qwen3:30b",
+            ["ContextWindow"] = 65536,
+            ["InputModalities"] = "Text, Image",
+            ["OutputModalities"] = "Text, Audio"
+        }));
+
+        var exitCode = await ModelCommand.RunAsync(
+            ["model", "set", "main", "my-ollama", "qwen3:30b"],
+            _paths, output: _output);
+
+        Assert.Equal(0, exitCode);
+        using var config = ReadConfigFile(_paths.NetclawConfigPath);
+        var main = ReadActiveModel(config, "Main");
+        Assert.Equal(expectedValue, main.GetProperty(propertyName).ToString());
     }
 
     [Fact]
@@ -524,8 +557,7 @@ public sealed class ModelCommandTests : IDisposable
             }
         ]);
 
-        // A modality override no longer short-circuits the probe: the probe must still run to
-        // validate the model and discover the context window, while the operator's modality wins.
+        // The probe still validates the model. The operator's modality remains authoritative.
         var exitCode = await ModelCommand.RunAsync(
             ["model", "set", "main", "openai-codex", "gpt-new-codex", "--input-modalities", "Text"],
             _paths, _fakeProbe, output: _output);
@@ -534,9 +566,9 @@ public sealed class ModelCommandTests : IDisposable
         Assert.Equal(1, _fakeProbe.ProbeCallCount);            // probe ran despite the modality flag
         using var config = ReadConfigFile(_paths.NetclawConfigPath);
         var main = ReadActiveModel(config, "Main");
-        Assert.Equal("Live", main.GetProperty("Provenance").GetString());     // resolved via probe
-        Assert.Equal(512000, main.GetProperty("ContextWindow").GetInt32());   // discovered window captured
-        Assert.Equal("Text", main.GetProperty("InputModalities").GetString());// operator override wins
+        Assert.Equal("Live", main.GetProperty("Provenance").GetString());
+        Assert.False(main.TryGetProperty("ContextWindow", out _));
+        Assert.Equal("Text", main.GetProperty("InputModalities").GetString());
     }
 
     [Fact]
@@ -590,6 +622,39 @@ public sealed class ModelCommandTests : IDisposable
     }
 
     [Fact]
+    public async Task List_MissingNamedDefinition_SurfacesResolverErrorWithoutAutofixGuidance()
+    {
+        WriteConfig(new Dictionary<string, object>
+        {
+            ["configVersion"] = 1,
+            ["Models"] = new Dictionary<string, object>
+            {
+                ["Definitions"] = new Dictionary<string, object>
+                {
+                    ["known"] = new Dictionary<string, object>
+                    {
+                        ["Provider"] = "my-ollama",
+                        ["ModelId"] = "qwen3:30b"
+                    }
+                },
+                ["Roles"] = new Dictionary<string, object>
+                {
+                    ["Main"] = "missing"
+                }
+            }
+        });
+
+        var exitCode = await ModelCommand.RunAsync(["model", "list"], _paths, output: _output);
+
+        var output = _output.ToString();
+        Assert.Equal(1, exitCode);
+        Assert.Contains("Models:Roles:Main references unknown definition 'missing'.", output);
+        Assert.Contains("Fix the Models section", output);
+        Assert.DoesNotContain("could not be parsed", output);
+        Assert.DoesNotContain("doctor --fix", output);
+    }
+
+    [Fact]
     public async Task Set_CorruptModalityButValidWindow_PreservesWindowEndToEnd()
     {
         // End-to-end regression for the full `model set` path: a re-set over a corrupt entry that
@@ -611,6 +676,115 @@ public sealed class ModelCommandTests : IDisposable
         var main = ReadActiveModel(config, "Main");
         Assert.Equal(32768, main.GetProperty("ContextWindow").GetInt32()); // valid clamp preserved
         Assert.False(main.TryGetProperty("InputModalities", out _));        // corrupt override dropped
+    }
+
+    [Fact]
+    public async Task Set_LegacyEnvironmentOverride_ReturnsErrorWithoutChangingConfig()
+    {
+        var config = ProvidersOnly();
+        config["Models"] = new Dictionary<string, object>
+        {
+            ["Main"] = new Dictionary<string, object>
+            {
+                ["Provider"] = "my-ollama",
+                ["ModelId"] = "qwen3:30b"
+            }
+        };
+        WriteConfig(config);
+        var original = File.ReadAllText(_paths.NetclawConfigPath);
+        const string envVar = "NETCLAW_Models__Main__ContextWindow";
+        var previous = Environment.GetEnvironmentVariable(envVar);
+
+        try
+        {
+            Environment.SetEnvironmentVariable(envVar, "65536");
+
+            var exitCode = await ModelCommand.RunAsync(
+                ["model", "set", "main", "my-ollama", "qwen3:8b"], _paths, output: _output);
+
+            Assert.Equal(1, exitCode);
+            Assert.Contains(
+                $"Error: Cannot migrate Models while legacy environment override '{envVar}' is set.",
+                _output.ToString(), StringComparison.Ordinal);
+            Assert.Equal(original, File.ReadAllText(_paths.NetclawConfigPath));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(envVar, previous);
+        }
+    }
+
+    [Fact]
+    public async Task Set_ConflictingLegacyRoles_ReturnsErrorWithoutChangingConfig()
+    {
+        var config = ProvidersOnly();
+        config["Models"] = new Dictionary<string, object>
+        {
+            ["Main"] = new Dictionary<string, object>
+            {
+                ["Provider"] = "my-ollama",
+                ["ModelId"] = "qwen3:30b",
+                ["ContextWindow"] = 32768
+            },
+            ["Fallback"] = new Dictionary<string, object>
+            {
+                ["Provider"] = "my-ollama",
+                ["ModelId"] = "qwen3:30b",
+                ["ContextWindow"] = 65536
+            }
+        };
+        WriteConfig(config);
+        var original = File.ReadAllText(_paths.NetclawConfigPath);
+
+        var exitCode = await ModelCommand.RunAsync(
+            ["model", "set", "compaction", "my-ollama", "qwen3:30b"], _paths, output: _output);
+
+        Assert.Equal(1, exitCode);
+        Assert.Contains(
+            "Error: Legacy model roles conflict for my-ollama/qwen3:30b; align their metadata before migration.",
+            _output.ToString(), StringComparison.Ordinal);
+        Assert.Equal(original, File.ReadAllText(_paths.NetclawConfigPath));
+    }
+
+    [Fact]
+    public async Task Clear_LegacyEnvironmentOverride_ReturnsErrorWithoutChangingConfig()
+    {
+        var config = ProvidersOnly();
+        config["Models"] = new Dictionary<string, object>
+        {
+            ["Main"] = new Dictionary<string, object>
+            {
+                ["Provider"] = "my-ollama",
+                ["ModelId"] = "qwen3:30b"
+            },
+            ["Fallback"] = new Dictionary<string, object>
+            {
+                ["Provider"] = "my-ollama",
+                ["ModelId"] = "qwen3:8b"
+            }
+        };
+        WriteConfig(config);
+        var original = File.ReadAllText(_paths.NetclawConfigPath);
+        const string envVar = "NETCLAW_Models__Fallback__ContextWindow";
+        var previous = Environment.GetEnvironmentVariable(envVar);
+
+        try
+        {
+            Environment.SetEnvironmentVariable(envVar, "65536");
+
+            var exitCode = await ModelCommand.RunAsync(
+                ["model", "clear", "fallback"], _paths, output: _output);
+
+            Assert.Equal(1, exitCode);
+            Assert.Contains(
+                $"Error: Cannot migrate Models while legacy environment override '{envVar}' is set.",
+                _output.ToString(), StringComparison.Ordinal);
+            Assert.Equal(original, File.ReadAllText(_paths.NetclawConfigPath));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(envVar, previous);
+        }
     }
 
     private static Dictionary<string, object> WithMainEntry(Dictionary<string, object> main)

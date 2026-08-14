@@ -1,4 +1,4 @@
-﻿// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
 // <copyright file="ConfigFileHelper.cs" company="Petabridge, LLC">
 //      Copyright (C) 2026 - 2026 Petabridge, LLC <https://petabridge.com>
 // </copyright>
@@ -177,14 +177,7 @@ internal static class ConfigFileHelper
             || !oldModels.TryGetProperty("Main", out _))
             return;
 
-        var legacyEnvironmentOverride = ModelEntryWriter.FindLegacyEnvironmentOverride();
-        if (legacyEnvironmentOverride is not null)
-        {
-            throw new InvalidOperationException(
-                $"Cannot migrate Models while legacy environment override '{legacyEnvironmentOverride}' is set. " +
-                "Move model overrides to NETCLAW_Models__Definitions__<name>__* and " +
-                "NETCLAW_Models__Roles__* first.");
-        }
+        ModelEntryWriter.ThrowIfLegacyEnvironmentOverride();
 
         var backupPath = path + ".legacy-models.bak";
         if (!File.Exists(backupPath))
@@ -198,6 +191,51 @@ internal static class ConfigFileHelper
     {
         var protector = SecretsProtection.CreateProtector(paths);
         SecretsFileWriter.Write(paths.SecretsPath, data, options: JsonDefaults.Indented, protector: protector);
+    }
+
+    internal static void UpdateSecretsFile(
+        Configuration.NetclawPaths paths,
+        Func<Dictionary<string, object>, bool, bool> update,
+        ISecretsProtector? protector = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(update);
+
+        UpdateSecretsFile<object?>(
+            paths,
+            (secrets, fileExisted) => (update(secrets, fileExisted), null),
+            protector,
+            cancellationToken);
+    }
+
+    internal static TResult UpdateSecretsFile<TResult>(
+        Configuration.NetclawPaths paths,
+        Func<Dictionary<string, object>, bool, (bool Write, TResult Result)> update,
+        ISecretsProtector? protector = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(update);
+
+        var effectiveProtector = protector ?? SecretsProtection.CreateProtector(paths);
+        return SecretsFileWriter.Update(
+            paths.SecretsPath,
+            (root, fileExisted) =>
+            {
+                var secrets = JsonSerializer.Deserialize<Dictionary<string, object>>(
+                                  root.ToJsonString(JsonDefaults.ConfigFile),
+                                  JsonDefaults.ConfigRead)
+                              ?? [];
+                var outcome = update(secrets, fileExisted);
+                if (!outcome.Write)
+                    return (null, outcome.Result);
+
+                var updatedRoot = JsonSerializer.SerializeToNode(secrets, JsonDefaults.ConfigFile)?.AsObject()
+                                  ?? [];
+                return (updatedRoot, outcome.Result);
+            },
+            effectiveProtector,
+            JsonDefaults.Indented,
+            cancellationToken);
     }
 
     internal static bool PathPresent(Dictionary<string, object> root, string path)

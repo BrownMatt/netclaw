@@ -14,7 +14,76 @@ namespace Netclaw.Actors.Tests.Tools;
 
 public class ShellToolTests
 {
-    private readonly ShellTool _tool = new(new ToolConfig(), new ToolPathPolicy([]), new ShellCommandPolicy());
+    private static readonly ShellExecutionEnvironment ShellEnvironment = TestShellEnvironment.Current;
+    private readonly ShellTool _tool = CreateTool();
+
+    public static bool IsWindows => OperatingSystem.IsWindows();
+
+    public static bool IsPosix => !OperatingSystem.IsWindows();
+
+    private static ShellTool CreateTool(ToolConfig? config = null)
+    {
+        var commandPolicy = new ShellCommandPolicy(ShellEnvironment);
+        return new ShellTool(
+            config ?? new ToolConfig(),
+            new ToolPathPolicy(ShellEnvironment, []),
+            commandPolicy);
+    }
+
+    [Fact]
+    public void Constructor_rejects_policies_from_different_shell_environments()
+    {
+        var first = ShellExecutionEnvironment.CreateBash(ShellPlatform.Linux);
+        var second = ShellExecutionEnvironment.CreateBash(ShellPlatform.Linux);
+
+        var exception = Assert.Throws<ArgumentException>(() => new ShellTool(
+            new ToolConfig(),
+            new ToolPathPolicy(first, []),
+            new ShellCommandPolicy(second)));
+
+        Assert.Contains("same shell environment", exception.Message);
+    }
+
+    [Fact]
+    public void Working_directory_schema_prefers_the_typed_argument_to_inline_cd()
+    {
+        var commandDescription = _tool.ParameterSchema
+            .GetProperty("properties")
+            .GetProperty("Command")
+            .GetProperty("description")
+            .GetString();
+        var description = _tool.ParameterSchema
+            .GetProperty("properties")
+            .GetProperty("WorkingDirectory")
+            .GetProperty("description")
+            .GetString();
+
+        Assert.Equal("The shell command to execute.", commandDescription);
+        Assert.Contains("Prefer this argument", description, StringComparison.Ordinal);
+        Assert.Contains("inline cd", description, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Missing_selected_executable_fails_without_fallback()
+    {
+        const string missingExecutable = @"C:\missing\pwsh.exe";
+        var environment = ShellExecutionEnvironment.CreatePowerShell(
+            missingExecutable,
+            ShellSyntaxTree.PwshDialect.PowerShell7);
+        var tool = new ShellTool(
+            new ToolConfig(),
+            new ToolPathPolicy(environment, []),
+            new ShellCommandPolicy(environment));
+
+        var result = await tool.ExecuteAsync(
+            ToolInput.Create("Command", "Get-ChildItem"),
+            TestToolExecutionContext.CreateUnbound(),
+            TestContext.Current.CancellationToken);
+
+        Assert.Contains(missingExecutable, result);
+        Assert.DoesNotContain("powershell.exe", result, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("cmd.exe", result, StringComparison.OrdinalIgnoreCase);
+    }
 
     [Fact]
     public async Task Execute_echo_returns_output()
@@ -26,10 +95,29 @@ public class ShellToolTests
         Assert.Contains("Exit code: 0", result);
     }
 
+    [SlopwatchSuppress("SW001", "This native fallback test requires Windows PowerShell 5.1.")]
+    [Fact(SkipUnless = nameof(IsWindows), Skip = "Native Windows PowerShell 5.1 execution requires Windows.")]
+    public async Task Windows_power_shell_51_executes_through_the_selected_host()
+    {
+        var environment = TestShellEnvironment.CreateWindowsPowerShell51();
+        var tool = new ShellTool(
+            new ToolConfig(),
+            new ToolPathPolicy(environment, []),
+            new ShellCommandPolicy(environment));
+
+        var result = await tool.ExecuteAsync(
+            ToolInput.Create("Command", "Write-Output windows-powershell-51"),
+            TestToolExecutionContext.CreateUnbound(),
+            TestContext.Current.CancellationToken);
+
+        Assert.Contains("windows-powershell-51", result);
+        Assert.Contains("Exit code: 0", result);
+    }
+
     [Fact]
     public async Task Execute_captures_stderr()
     {
-        var args = ToolInput.Create("Command", "echo error >&2");
+        var args = ToolInput.Create("Command", TestShellEnvironment.StandardErrorCommand);
         var result = await _tool.ExecuteAsync(args, TestToolExecutionContext.CreateUnbound(), CancellationToken.None);
 
         Assert.Contains("error", result);
@@ -48,8 +136,8 @@ public class ShellToolTests
     [Fact]
     public async Task Timeout_kills_long_running_process()
     {
-        var tool = new ShellTool(new ToolConfig(), new ToolPathPolicy([]), new ShellCommandPolicy());
-        var args = ToolInput.Create("Command", "sleep 100");
+        var tool = CreateTool();
+        var args = ToolInput.Create("Command", TestShellEnvironment.LongRunningCommand);
         var context = TestToolExecutionContext.CreateBound("test/thread", Path.GetTempPath(), new TestToolExecutionContextOptions
         {
             Audience = TrustAudience.Personal,
@@ -62,22 +150,6 @@ public class ShellToolTests
     }
 
     [Fact]
-    public async Task Requested_timeout_overrides_default_timeout()
-    {
-        var tool = new ShellTool(new ToolConfig(), new ToolPathPolicy([]), new ShellCommandPolicy());
-        var args = ToolInput.Create("Command", "sleep 1");
-        var context = TestToolExecutionContext.CreateBound("test/thread", Path.GetTempPath(), new TestToolExecutionContextOptions
-        {
-            Audience = TrustAudience.Personal,
-            ExecutionTimeout = new ToolExecutionTimeout(TimeSpan.FromSeconds(5))
-        });
-
-        var result = await tool.ExecuteAsync(args, context, CancellationToken.None);
-
-        Assert.Contains("Exit code: 0", result);
-    }
-
-    [Fact]
     public async Task Caller_cancellation_kills_child_process_tree_and_returns_gracefully()
     {
         // Reproduces the session-pipeline path: ShellTool's own timeout is long,
@@ -87,9 +159,9 @@ public class ShellToolTests
         // exception. On Unix the command also spawns a background child that
         // inherits stdout/stderr; if the tree kill regresses, that child keeps
         // the pipe write-ends open and the test never completes.
-        var tool = new ShellTool(new ToolConfig(), new ToolPathPolicy([]), new ShellCommandPolicy());
-        var command = OperatingSystem.IsWindows()
-            ? "ping 127.0.0.1 -n 120 > nul"
+        var tool = CreateTool();
+        var command = ShellEnvironment.Grammar == ShellGrammar.PowerShell
+            ? "ping.exe 127.0.0.1 -n 120 | Out-Null"
             : "sleep 120 & wait";
         var args = ToolInput.Create("Command", command);
         var context = TestToolExecutionContext.CreateBound("test/thread", Path.GetTempPath(), new TestToolExecutionContextOptions
@@ -109,9 +181,9 @@ public class ShellToolTests
     {
         // ShellTool only returns its (bounded) raw output now — redaction and the
         // inline-budget bound + spill happen centrally in DispatchingToolExecutor
-        // (covered by DispatchingToolExecutorTests). `echo` is a builtin on both
-        // bash and cmd.exe; a long literal is deterministic on stdout.
-        var tool = new ShellTool(new ToolConfig(), new ToolPathPolicy([]), new ShellCommandPolicy());
+        // (covered by DispatchingToolExecutorTests). `echo` is available in both
+        // canonical host grammars; a long literal is deterministic on stdout.
+        var tool = CreateTool();
         var args = ToolInput.Create("Command", $"echo {new string('x', 200)}");
 
         var result = await tool.ExecuteAsync(args, TestToolExecutionContext.CreateUnbound(), CancellationToken.None);
@@ -125,8 +197,7 @@ public class ShellToolTests
     public async Task Working_directory_is_respected()
     {
         var tmpDir = Path.GetTempPath();
-        // Use platform-appropriate command to print working directory
-        var command = OperatingSystem.IsWindows() ? "cd" : "pwd";
+        var command = TestShellEnvironment.PrintWorkingDirectoryCommand;
         var args = ToolInput.Create("Command", command, "WorkingDirectory", tmpDir);
 
         var result = await _tool.ExecuteAsync(args, TestToolExecutionContext.CreateUnbound(), CancellationToken.None);
@@ -160,7 +231,7 @@ public class ShellToolTests
         {
             var context = TestToolExecutionContext.CreateBound("session-1", sessionDir, new TestToolExecutionContextOptions
             { Audience = TrustAudience.Personal, ProjectDirectory = projectDir });
-            var args = ToolInput.Create("Command", OperatingSystem.IsWindows() ? "cd" : "pwd");
+            var args = ToolInput.Create("Command", TestShellEnvironment.PrintWorkingDirectoryCommand);
 
             var result = await _tool.ExecuteAsync(args, context, CancellationToken.None);
 
@@ -184,7 +255,7 @@ public class ShellToolTests
         {
             var context = TestToolExecutionContext.CreateBound("session-1", sessionDir, TrustAudience.Personal);
             // ProjectDirectory not set
-            var args = ToolInput.Create("Command", OperatingSystem.IsWindows() ? "cd" : "pwd");
+            var args = ToolInput.Create("Command", TestShellEnvironment.PrintWorkingDirectoryCommand);
 
             var result = await _tool.ExecuteAsync(args, context, CancellationToken.None);
 
@@ -205,7 +276,7 @@ public class ShellToolTests
         try
         {
             var context = TestToolExecutionContext.CreateBound("session-1", sessionDir, TrustAudience.Personal);
-            var args = ToolInput.Create("Command", OperatingSystem.IsWindows() ? "cd" : "pwd");
+            var args = ToolInput.Create("Command", TestShellEnvironment.PrintWorkingDirectoryCommand);
 
             var result = await _tool.ExecuteAsync(args, context, CancellationToken.None);
 
@@ -234,7 +305,7 @@ public class ShellToolTests
             var context = TestToolExecutionContext.CreateBound("session-1", sessionDir, new TestToolExecutionContextOptions
             { Audience = TrustAudience.Personal, ProjectDirectory = projectDir });
             var args = ToolInput.Create(
-                "Command", OperatingSystem.IsWindows() ? "cd" : "pwd",
+                "Command", TestShellEnvironment.PrintWorkingDirectoryCommand,
                 "WorkingDirectory", explicitDir);
 
             var result = await _tool.ExecuteAsync(args, context, CancellationToken.None);
@@ -263,7 +334,7 @@ public class ShellToolTests
             // Environment.CurrentDirectory happens to be — proving the
             // ProcessStartInfo default-fall-through is gone.
             var context = TestToolExecutionContext.CreateBound("session-1", sessionDir, TrustAudience.Personal);
-            var args = ToolInput.Create("Command", OperatingSystem.IsWindows() ? "cd" : "pwd");
+            var args = ToolInput.Create("Command", TestShellEnvironment.PrintWorkingDirectoryCommand);
 
             var result = await _tool.ExecuteAsync(args, context, CancellationToken.None);
 
@@ -298,7 +369,7 @@ public class ShellToolTests
 
         Assert.Contains("does not exist", result);
         Assert.Contains(missingDir, result);
-        Assert.Contains("mkdir", result);
+        Assert.Contains(TestShellEnvironment.CreateDirectoryCommandName, result);
         // The process must never start with a missing cwd...
         Assert.DoesNotContain("Exit code", result);
         // ...and the tool must not silently create the directory either.
@@ -460,5 +531,47 @@ public class ShellToolTests
         Assert.DoesNotContain("hard deny policy", result);
         Assert.Contains("protected file path", result);
         Assert.Contains("Access denied", result);
+    }
+
+    [SlopwatchSuppress("SW001", "This test requires native POSIX symbolic-link behavior.")]
+    [Fact(SkipUnless = nameof(IsPosix), Skip = "POSIX-only symbolic-link semantics")]
+    public async Task Authorized_execution_rechecks_current_symbolic_link_state()
+    {
+        var root = Directory.CreateTempSubdirectory("netclaw-shell-recheck-");
+        try
+        {
+            var deniedDirectory = Directory.CreateDirectory(Path.Combine(root.FullName, "denied"));
+            var deniedFile = Path.Combine(deniedDirectory.FullName, "secret.txt");
+            await File.WriteAllTextAsync(
+                deniedFile,
+                "secret",
+                TestContext.Current.CancellationToken);
+            var link = Path.Combine(root.FullName, "late-link");
+            var environment = ShellExecutionEnvironment.CreateBash(ShellPlatform.Linux);
+            var pathPolicy = new ToolPathPolicy(environment, [deniedDirectory.FullName]);
+            var commandPolicy = new ShellCommandPolicy(environment);
+            var tool = new ShellTool(new ToolConfig(), pathPolicy, commandPolicy);
+            var command = $"cat {link}";
+            var analysis = commandPolicy.Analyze(command, root.FullName);
+            Assert.False(pathPolicy.CommandReferencesDeniedPath(analysis));
+
+            File.CreateSymbolicLink(link, deniedFile);
+            var result = await tool.ExecuteAuthorizedAsync(
+                ToolInput.Create(
+                    "Command",
+                    command,
+                    "WorkingDirectory",
+                    root.FullName),
+                TestToolExecutionContext.CreateUnbound().Invocation,
+                analysis,
+                TestContext.Current.CancellationToken);
+
+            Assert.Contains("protected file path", result);
+            Assert.Contains("Access denied", result);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
     }
 }

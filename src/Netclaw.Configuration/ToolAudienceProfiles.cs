@@ -1,4 +1,4 @@
-﻿// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
 // <copyright file="ToolAudienceProfiles.cs" company="Petabridge, LLC">
 //      Copyright (C) 2026 - 2026 Petabridge, LLC <https://petabridge.com>
 // </copyright>
@@ -191,6 +191,27 @@ public static class ToolAudienceProfileDefaults
         Personal = CreatePersonal(),
         GlobalReadRoots = [SkillsDirectoryToken, IdentityDirectoryToken, WorkspacesDirectoryToken]
     };
+
+    /// <summary>
+    /// Creates the audience profiles that a new installation stores for the selected posture.
+    /// Personal installations require approval for shell commands unless another authorization gate permits the command.
+    /// </summary>
+    public static ToolAudienceProfiles CreateProfilesForPosture(DeploymentPosture posture)
+    {
+        var profiles = CreateProfiles();
+        if (posture == DeploymentPosture.Personal)
+        {
+            profiles.Personal.ApprovalPolicy = new ToolApprovalConfig
+            {
+                ToolOverrides = new Dictionary<string, ToolApprovalMode>(StringComparer.Ordinal)
+                {
+                    [ToolAudienceProfileToolCatalog.ShellExecute] = ToolApprovalMode.Approval
+                }
+            };
+        }
+
+        return profiles;
+    }
 
     // Audience tool grants are monotonic: Public ⊆ Team ⊆ Personal. Public is
     // the least-trusted, fail-closed audience — read, enumerate, and attach

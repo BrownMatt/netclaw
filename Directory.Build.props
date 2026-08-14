@@ -8,14 +8,11 @@
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-    <VersionPrefix>0.25.0</VersionPrefix>
-    <VersionSuffix>beta.5</VersionSuffix>
-    <PackageReleaseNotes>- Preserve Git working context across sessions and subagents — A bounded, audience-aware Git working-context snapshot stays current in the system prompt, and coding subagents inherit recent-file/project context (#1630)
-- User-written AGENTS.md for application-specific agent guidance — Operators can author ~/.netclaw/identity/AGENTS.md, layered after Netclaw's embedded operating core and inherited by sub-agents (#1622)
-- Memory curation no longer overwrites existing documents on collision — Create-decision collisions now append new content instead of silently overwriting the existing document (#1637)
-- STDIO MCP server arguments no longer rewritten — The daemon now preserves configured STDIO MCP server arguments, and uses one daemon-owned client per configured MCP server (#1636)
-- Logical skill access and authoritative inventory refresh — Skill loading now resolves through logical skill_load/skill_read_resource access with native &gt; managed-feed &gt; external precedence (#1634)
-- Bump SkillServer to stable — Netclaw.SkillClient 0.4.0-beta.4 → 0.4.0 (#1638)</PackageReleaseNotes>
+    <VersionPrefix>0.26.0</VersionPrefix>
+    <VersionSuffix>beta.4</VersionSuffix>
+    <PackageReleaseNotes>
+      Features: MCP server prompts loadable as dynamic skills; native PowerShell on Windows with 5.1 fallback. Bug fixes: reminders no longer skipped on execution capacity; OAuth-broken MCP connections demote to AwaitingAuth with operator alert; MCP HTTP fallback header race fixed; daemon working directory preserved across restarts; /dev/null redirects no longer open a reusable /dev scope; PowerShell host probe retries cold starts and falls back to 5.1. Internal: shell approval analysis migrated to ShellSyntaxTree fail-closed parser; reduced PowerShell approval repetition; pinned Bash hidden-execution boundaries; PowerShell execution-region approvals. Dependency updates: SlackNet 0.17.11, ShellSyntaxTree 0.3.0-alpha.6.
+    </PackageReleaseNotes>
   </PropertyGroup>
   <PropertyGroup>
     <NetCoreTestVersion>net10.0</NetCoreTestVersion>

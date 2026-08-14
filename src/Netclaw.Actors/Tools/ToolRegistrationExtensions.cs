@@ -1,4 +1,4 @@
-﻿// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
 // <copyright file="ToolRegistrationExtensions.cs" company="Petabridge, LLC">
 //      Copyright (C) 2026 - 2026 Petabridge, LLC <https://petabridge.com>
 // </copyright>
@@ -40,7 +40,7 @@ public static class ToolRegistrationExtensions
         registry.Register(new FileListTool(config, paths, pathPolicy));
         registry.Register(new FileWriteTool(config, paths, pathPolicy));
         registry.Register(new FileEditTool(config, paths, pathPolicy));
-        registry.Register(new AttachFileTool(config, paths));
+        registry.Register(new AttachFileTool(config, paths, pathPolicy));
         if (webhookRouteStore is not null)
         {
             registry.Register(new SetWebhookTool(webhookRouteStore));
@@ -68,6 +68,7 @@ public static class ToolRegistrationExtensions
         SkillRegistry skillRegistry,
         NetclawPaths paths,
         ISkillContentScanner scanner,
+        IMcpPromptSkillLoader mcpPromptLoader,
         SkillInventoryRefresher inventoryRefresher,
         ISessionMetrics? sessionMetrics = null,
         SubAgentDefinitionRegistry? subAgentRegistry = null,
@@ -79,6 +80,7 @@ public static class ToolRegistrationExtensions
         registry.Register(new SkillLoadTool(
             skillRegistry,
             scanner,
+            mcpPromptLoader,
             sessionMetrics,
             subAgentRegistry,
             subAgentSpawner,
@@ -137,6 +139,30 @@ public static class ToolRegistrationExtensions
         int maxSchemaWarnChars = 0,
         ILogger? logger = null)
     {
+        var adapters = PrepareMcpTools(
+            serverName,
+            tools.Cast<AIFunction>().ToList(),
+            grantCategory,
+            invoker,
+            maxDescriptionChars,
+            maxSchemaWarnChars,
+            logger);
+
+        foreach (var adapter in adapters)
+            registry.Register(adapter);
+
+        return registry;
+    }
+
+    public static IReadOnlyList<McpToolAdapter> PrepareMcpTools(
+        string serverName,
+        IReadOnlyList<AIFunction> tools,
+        string? grantCategory,
+        IMcpToolInvoker? invoker,
+        int maxDescriptionChars,
+        int maxSchemaWarnChars,
+        ILogger? logger)
+    {
         var adapters = new List<McpToolAdapter>(tools.Count);
         foreach (var tool in tools)
         {
@@ -163,9 +189,6 @@ public static class ToolRegistrationExtensions
             }
         }
 
-        foreach (var adapter in adapters)
-            registry.Register(adapter);
-
-        return registry;
+        return adapters;
     }
 }

@@ -1,4 +1,4 @@
-﻿// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
 // <copyright file="DaemonApi.cs" company="Petabridge, LLC">
 //      Copyright (C) 2026 - 2026 Petabridge, LLC <https://petabridge.com>
 // </copyright>
@@ -141,6 +141,24 @@ public sealed class DaemonApi
         return await JsonSerializer.DeserializeAsync<SkillUsageStats.Response>(stream, JsonDefaults.Api, cts.Token);
     }
 
+    // ── Skills ────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Fetches the daemon's live skill inventory — file skills plus dynamic MCP
+    /// prompt skills a disk scan cannot see. Throws <see cref="HttpRequestException"/>
+    /// (or a timeout) when the daemon is unreachable; callers report the daemon as
+    /// unavailable rather than degrading to a disk scan.
+    /// </summary>
+    public async Task<SkillInventory.Response?> GetSkillsAsync(CancellationToken ct = default)
+    {
+        using var cts = CreateTimeoutCts(DefaultTimeout, ct);
+        var client = CreateHttpClient();
+        using var response = await client.GetAsync($"{_endpoint}/api/skills", cts.Token);
+        response.EnsureSuccessStatusCode();
+        var stream = await response.Content.ReadAsStreamAsync(cts.Token);
+        return await JsonSerializer.DeserializeAsync<SkillInventory.Response>(stream, JsonDefaults.Api, cts.Token);
+    }
+
     // ── Reminders ─────────────────────────────────────────────────────
 
     public async Task<HttpResponseMessage> ListRemindersAsync(CancellationToken ct = default)
@@ -241,12 +259,20 @@ public sealed class DaemonApi
             $"{_endpoint}/api/mcp/oauth/status-by-state/{Uri.EscapeDataString(state)}", cts.Token);
     }
 
-    public async Task<HttpResponseMessage> McpOAuthCallbackAsync(string code, string state, CancellationToken ct = default)
+    public async Task<HttpResponseMessage> McpOAuthCallbackAsync(
+        string code,
+        string state,
+        string? iss,
+        CancellationToken ct = default)
     {
         using var cts = CreateTimeoutCts(LongTimeout, ct);
         var client = CreateHttpClient();
-        return await client.GetAsync(
-            $"{_endpoint}/api/mcp/oauth/callback?code={Uri.EscapeDataString(code)}&state={Uri.EscapeDataString(state)}", cts.Token);
+        // The MCP SDK validates iss per RFC 9207 and rejects the response when an advertising
+        // server sent one and it does not arrive, so the paste path must carry it too.
+        var query = $"code={Uri.EscapeDataString(code)}&state={Uri.EscapeDataString(state)}";
+        if (!string.IsNullOrEmpty(iss))
+            query += $"&iss={Uri.EscapeDataString(iss)}";
+        return await client.GetAsync($"{_endpoint}/api/mcp/oauth/callback?{query}", cts.Token);
     }
 
     public async Task<JsonElement> GetMcpServerStatusesAsync(CancellationToken ct = default)

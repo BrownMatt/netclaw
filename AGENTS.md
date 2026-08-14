@@ -9,6 +9,34 @@ Keep it small. Keep it durable. Keep it routing-focused.
 - Default to smallest safe change that advances MVP.
 - Prefer explicit tradeoffs over hidden complexity.
 
+## Communication Standard
+
+Write all agent output in ASD-STE100 Simplified Technical English (STE). This
+applies to chat replies, commit messages, PR descriptions, code comments, docs,
+and spec text.
+
+Rules:
+
+- Give one sentence one idea. Keep an instruction to 20 words or fewer. Keep a
+  descriptive sentence to 25 words or fewer.
+- Use the active voice. Name the actor that does the action.
+- Use simple tenses: past, present, and future. Do not use perfect or
+  progressive tenses.
+- Do not use an `-ing` word as a noun or as an adjective. Use a noun or a
+  relative clause.
+- Keep the articles `a`, `an`, and `the`. Do not delete words to make a
+  sentence shorter.
+- Give one word one meaning. Do not use the same word as a noun and as a verb.
+- Keep a descriptive paragraph to six sentences or fewer.
+- Put complex information in a vertical list.
+- Put a warning or a caution before the step that it applies to.
+
+STE does not apply to code identifiers, file paths, log text, or quoted
+material. Keep those exact.
+
+STE does not override accuracy. If the approved vocabulary cannot state a
+technical fact correctly, state the fact correctly and keep the sentence short.
+
 ## Current Product Direction
 
 - Netclaw is an open-source, self-hosted autonomous operations agent built on Akka.Agents.
@@ -113,6 +141,18 @@ For configuration changes, tests must prove both:
 Do not treat UI-level save success or schema validity as sufficient when runtime
 behavior depends on provider IDs, canonical names, permissions, or security
 policy keys.
+
+## Shell Approval Abstraction Rule
+
+Netclaw shell approval code must not parse an executable's private command,
+subcommand, option, or operand grammar. Approval analysis must use general shell
+facts. These facts include syntax, control flow, typed values, path scopes, and
+authority boundaries.
+
+Explicit safe-verb and hard-deny lists are policy data. They must not become
+executable-specific parsers. If ShellSyntaxTree lacks a required fact, keep the
+input unresolved. Propose a general ShellSyntaxTree capability instead. Do not
+move a Netclaw executable special case into ShellSyntaxTree.
 
 ## Automation Floor
 

@@ -1,4 +1,4 @@
-﻿// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
 // <copyright file="SubAgentActorTests.cs" company="Petabridge, LLC">
 //      Copyright (C) 2026 - 2026 Petabridge, LLC <https://petabridge.com>
 // </copyright>
@@ -11,6 +11,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using System.Threading.Channels;
 using Netclaw.Actors.SubAgents;
+using Netclaw.Actors.Sessions;
 using Netclaw.Actors.Sessions.Pipelines;
 using Netclaw.Actors.Tools;
 using Netclaw.Actors.Tests.Memory;
@@ -29,6 +30,7 @@ namespace Netclaw.Actors.Tests.SubAgents;
 public class SubAgentActorTests : TestKit
 {
     private static readonly TimeSpan ApprovalAskTimeout = TimeSpan.FromSeconds(30);
+    public static bool IsPosix => !OperatingSystem.IsWindows();
 
     public SubAgentActorTests(ITestOutputHelper output) : base(output: output) { }
 
@@ -62,7 +64,7 @@ public class SubAgentActorTests : TestKit
     {
         var fakeClient = new FakeChatClient();
         var definition = CreateDefinition();
-        var agent = Sys.ActorOf(SubAgentActor.CreateProps(definition, fakeClient));
+        var agent = Sys.ActorOf(SubAgentActor.CreateProps(definition, fakeClient, PermissivePolicy()));
 
         var result = await agent.Ask<SubAgentResult>(
             new RunSubAgent { Scope = SubAgentTestScope.Create(), Task = "Say hello", Timeout = TimeSpan.FromSeconds(5) },
@@ -88,7 +90,7 @@ public class SubAgentActorTests : TestKit
             ]
         };
         var definition = CreateDefinition();
-        var agent = Sys.ActorOf(SubAgentActor.CreateProps(definition, fakeClient));
+        var agent = Sys.ActorOf(SubAgentActor.CreateProps(definition, fakeClient, PermissivePolicy()));
 
         var result = await agent.Ask<SubAgentResult>(
             new RunSubAgent { Scope = SubAgentTestScope.Create(), Task = "Analyze repos", Timeout = TimeSpan.FromSeconds(5) },
@@ -115,7 +117,7 @@ public class SubAgentActorTests : TestKit
             ]
         };
         var definition = CreateDefinition();
-        var agent = Sys.ActorOf(SubAgentActor.CreateProps(definition, fakeClient));
+        var agent = Sys.ActorOf(SubAgentActor.CreateProps(definition, fakeClient, PermissivePolicy()));
 
         var result = await agent.Ask<SubAgentResult>(
             new RunSubAgent { Scope = SubAgentTestScope.Create(), Task = "Analyze repos", Timeout = TimeSpan.FromSeconds(5) },
@@ -150,7 +152,7 @@ public class SubAgentActorTests : TestKit
             ResponseTextsByCall = [finalOutput]
         };
         var definition = CreateDefinition();
-        var agent = Sys.ActorOf(SubAgentActor.CreateProps(definition, fakeClient));
+        var agent = Sys.ActorOf(SubAgentActor.CreateProps(definition, fakeClient, PermissivePolicy()));
 
         var result = await agent.Ask<SubAgentResult>(
             new RunSubAgent { Scope = SubAgentTestScope.Create(), Task = "Explain malformed output", Timeout = TimeSpan.FromSeconds(5) },
@@ -176,8 +178,9 @@ public class SubAgentActorTests : TestKit
     public async Task System_prompt_includes_headless_subagent_contract()
     {
         var fakeClient = new FakeChatClient();
-        var definition = CreateDefinition();
-        var agent = Sys.ActorOf(SubAgentActor.CreateProps(definition, fakeClient));
+        var scopeTool = new FakeNetclawTool(SetWorkingDirectoryTool.ToolName, "ok");
+        var definition = CreateDefinition([scopeTool]);
+        var agent = Sys.ActorOf(SubAgentActor.CreateProps(definition, fakeClient, PermissivePolicy()));
 
         var result = await agent.Ask<SubAgentResult>(
             new RunSubAgent { Scope = SubAgentTestScope.Create(), Task = "Say hello", Timeout = TimeSpan.FromSeconds(5) },
@@ -191,6 +194,58 @@ public class SubAgentActorTests : TestKit
         Assert.Contains("safety, security, trust-boundary, approval, and tool-policy rules remain mandatory", fakeClient.LastReceivedMessages[0].Text);
         Assert.Contains("Do not ask the user clarifying questions", fakeClient.LastReceivedMessages[0].Text);
         Assert.Contains("Parent-mediated tool approval", fakeClient.LastReceivedMessages[0].Text);
+        Assert.Contains("call set_working_directory once, even with absolute paths", fakeClient.LastReceivedMessages[0].Text);
+    }
+
+    [Fact]
+    public async Task System_prompt_omits_project_declaration_when_scope_tool_is_unavailable()
+    {
+        var fakeClient = new FakeChatClient();
+        var agent = Sys.ActorOf(SubAgentActor.CreateProps(
+            CreateDefinition(),
+            fakeClient,
+            PermissivePolicy()));
+
+        var result = await agent.Ask<SubAgentResult>(
+            new RunSubAgent
+            {
+                Scope = SubAgentTestScope.Create(),
+                Task = "Say hello",
+                Timeout = TimeSpan.FromSeconds(5)
+            },
+            TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+        Assert.True(result.Success);
+        Assert.NotNull(fakeClient.LastReceivedMessages);
+        Assert.DoesNotContain(
+            "call set_working_directory once",
+            fakeClient.LastReceivedMessages[0].Text);
+    }
+
+    [Fact]
+    public async Task Public_system_prompt_omits_project_declaration_even_when_definition_contains_scope_tool()
+    {
+        var fakeClient = new FakeChatClient();
+        var scopeTool = new FakeNetclawTool(SetWorkingDirectoryTool.ToolName, "ok");
+        var agent = Sys.ActorOf(SubAgentActor.CreateProps(
+            CreateDefinition([scopeTool]),
+            fakeClient,
+            PermissivePolicy()));
+
+        var result = await agent.Ask<SubAgentResult>(
+            new RunSubAgent
+            {
+                Scope = SubAgentTestScope.Create(audience: TrustAudience.Public),
+                Task = "Say hello",
+                Timeout = TimeSpan.FromSeconds(5)
+            },
+            TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+        Assert.True(result.Success);
+        Assert.NotNull(fakeClient.LastReceivedMessages);
+        Assert.DoesNotContain(
+            "call set_working_directory once",
+            fakeClient.LastReceivedMessages[0].Text);
     }
 
     [Fact]
@@ -203,7 +258,7 @@ public class SubAgentActorTests : TestKit
             ProjectInstructions = "Project rules: prefer C#.",
             SystemPrompt = "You are a test agent.\n\n[Skill Overlay]\nUse focused analysis."
         };
-        var agent = Sys.ActorOf(SubAgentActor.CreateProps(definition, fakeClient));
+        var agent = Sys.ActorOf(SubAgentActor.CreateProps(definition, fakeClient, PermissivePolicy()));
 
         var result = await agent.Ask<SubAgentResult>(
             new RunSubAgent { Scope = SubAgentTestScope.Create(), Task = "Do the thing.", Timeout = TimeSpan.FromSeconds(5) },
@@ -241,7 +296,7 @@ public class SubAgentActorTests : TestKit
         };
 
         var definition = CreateDefinition([fakeTool]);
-        var agent = Sys.ActorOf(SubAgentActor.CreateProps(definition, fakeClient));
+        var agent = Sys.ActorOf(SubAgentActor.CreateProps(definition, fakeClient, PermissivePolicy()));
 
         var result = await agent.Ask<SubAgentResult>(
             new RunSubAgent { Scope = SubAgentTestScope.Create(), Task = "Greet the user", Timeout = TimeSpan.FromSeconds(5) },
@@ -269,7 +324,7 @@ public class SubAgentActorTests : TestKit
             ToolCallsOnFirstCall = [new FunctionCallContent("call-image", "load_image")]
         };
         var definition = CreateDefinition([fakeTool]);
-        var agent = Sys.ActorOf(SubAgentActor.CreateProps(definition, fakeClient));
+        var agent = Sys.ActorOf(SubAgentActor.CreateProps(definition, fakeClient, PermissivePolicy()));
 
         var result = await agent.Ask<SubAgentResult>(
             new RunSubAgent
@@ -306,7 +361,7 @@ public class SubAgentActorTests : TestKit
         };
 
         var definition = CreateDefinition([fakeTool]);
-        var agent = Sys.ActorOf(SubAgentActor.CreateProps(definition, fakeClient));
+        var agent = Sys.ActorOf(SubAgentActor.CreateProps(definition, fakeClient, PermissivePolicy()));
 
         var result = await agent.Ask<SubAgentResult>(
             new RunSubAgent
@@ -337,7 +392,7 @@ public class SubAgentActorTests : TestKit
         };
 
         var definition = CreateDefinition([fakeTool]);
-        var agent = Sys.ActorOf(SubAgentActor.CreateProps(definition, fakeClient));
+        var agent = Sys.ActorOf(SubAgentActor.CreateProps(definition, fakeClient, PermissivePolicy()));
 
         var result = await agent.Ask<SubAgentResult>(
             new RunSubAgent
@@ -363,7 +418,7 @@ public class SubAgentActorTests : TestKit
             ToolCallsOnFirstCall = [new FunctionCallContent("call-cwd", "inspect_context")]
         };
 
-        var agent = Sys.ActorOf(SubAgentActor.CreateProps(CreateDefinition([fakeTool]), fakeClient));
+        var agent = Sys.ActorOf(SubAgentActor.CreateProps(CreateDefinition([fakeTool]), fakeClient, PermissivePolicy()));
 
         var result = await agent.Ask<SubAgentResult>(
             new RunSubAgent
@@ -394,7 +449,7 @@ public class SubAgentActorTests : TestKit
             ToolCallsOnFirstCall = [new FunctionCallContent("call-null-cwd", "inspect_context")]
         };
 
-        var agent = Sys.ActorOf(SubAgentActor.CreateProps(CreateDefinition([fakeTool]), fakeClient));
+        var agent = Sys.ActorOf(SubAgentActor.CreateProps(CreateDefinition([fakeTool]), fakeClient, PermissivePolicy()));
 
         var result = await agent.Ask<SubAgentResult>(
             new RunSubAgent
@@ -425,7 +480,7 @@ public class SubAgentActorTests : TestKit
             ToolCallsOnFirstCall = [new FunctionCallContent("call-inherit-only", "inspect_context")]
         };
 
-        var agent = Sys.ActorOf(SubAgentActor.CreateProps(CreateDefinition([fakeTool]), fakeClient));
+        var agent = Sys.ActorOf(SubAgentActor.CreateProps(CreateDefinition([fakeTool]), fakeClient, PermissivePolicy()));
 
         var result = await agent.Ask<SubAgentResult>(
             new RunSubAgent
@@ -451,7 +506,7 @@ public class SubAgentActorTests : TestKit
         {
             ToolCallsOnFirstCall = [new FunctionCallContent("call-1", "inspect_context")]
         };
-        var firstAgent = Sys.ActorOf(SubAgentActor.CreateProps(CreateDefinition([firstTool]), firstClient));
+        var firstAgent = Sys.ActorOf(SubAgentActor.CreateProps(CreateDefinition([firstTool]), firstClient, PermissivePolicy()));
 
         var firstResult = await firstAgent.Ask<SubAgentResult>(
             new RunSubAgent
@@ -469,7 +524,7 @@ public class SubAgentActorTests : TestKit
         {
             ToolCallsOnFirstCall = [new FunctionCallContent("call-2", "inspect_context")]
         };
-        var secondAgent = Sys.ActorOf(SubAgentActor.CreateProps(CreateDefinition([secondTool]), secondClient));
+        var secondAgent = Sys.ActorOf(SubAgentActor.CreateProps(CreateDefinition([secondTool]), secondClient, PermissivePolicy()));
 
         var secondResult = await secondAgent.Ask<SubAgentResult>(
             new RunSubAgent
@@ -489,7 +544,7 @@ public class SubAgentActorTests : TestKit
     {
         var fakeClient = new FakeChatClient();
         var definition = CreateDefinition() with { ProjectInstructions = "Project rules: prefer C#." };
-        var agent = Sys.ActorOf(SubAgentActor.CreateProps(definition, fakeClient));
+        var agent = Sys.ActorOf(SubAgentActor.CreateProps(definition, fakeClient, PermissivePolicy()));
 
         var result = await agent.Ask<SubAgentResult>(
             new RunSubAgent { Scope = SubAgentTestScope.Create(), Task = "Do the thing.", Timeout = TimeSpan.FromSeconds(5) },
@@ -507,7 +562,7 @@ public class SubAgentActorTests : TestKit
     {
         var fakeClient = new FakeChatClient();
         var definition = CreateDefinition();
-        var agent = Sys.ActorOf(SubAgentActor.CreateProps(definition, fakeClient));
+        var agent = Sys.ActorOf(SubAgentActor.CreateProps(definition, fakeClient, PermissivePolicy()));
 
         var result = await agent.Ask<SubAgentResult>(
             new RunSubAgent { Scope = SubAgentTestScope.Create(), Task = "Do the thing.", Timeout = TimeSpan.FromSeconds(5) },
@@ -591,6 +646,286 @@ public class SubAgentActorTests : TestKit
         Assert.Contains(approvalBridge.RequestedOptions, o => o.Key == ApprovalOptionKeys.ApproveEverywhere);
         Assert.Contains(approvalBridge.RequestedOptions, o => o.Key == ApprovalOptionKeys.ApproveAlways);
         Assert.Contains(approvalBridge.RequestedOptions, o => o.Key == ApprovalOptionKeys.ApproveSession);
+    }
+
+    [Fact]
+    public async Task Subagent_platform_temp_call_receives_scratch_correction_before_parent_bridge()
+    {
+        var fakeTool = new FakeNetclawTool(ShellTool.ToolName, "should not run");
+        var fakeClient = new FakeChatClient
+        {
+            ToolCallsOnFirstCall =
+            [
+                ScratchCall("call-scratch-correction")
+            ]
+        };
+        var approvalBridge = new RecordingParentApprovalBridge(ParentApprovalDecision.ApprovedOnce);
+        var agent = Sys.ActorOf(SubAgentActor.CreateProps(
+            CreateDefinition([fakeTool]),
+            fakeClient,
+            CreateScratchCorrectionPolicy()));
+
+        var result = await agent.Ask<SubAgentResult>(
+            new RunSubAgent
+            {
+                Scope = SubAgentTestScope.Create(
+                    sessionDirectory: "/home/user/.netclaw/sessions/example",
+                    approvalBridge: approvalBridge),
+                Task = "Inspect a disposable diagnostic artifact.",
+                Timeout = TimeSpan.FromSeconds(5)
+            },
+            ApprovalAskTimeout,
+            TestContext.Current.CancellationToken);
+
+        Assert.True(result.Success, result.Output);
+        Assert.False(fakeTool.WasCalled);
+        Assert.Equal(0, approvalBridge.RequestCount);
+        Assert.Contains(
+            "shared_temporary_directory",
+            GetLastToolResult(fakeClient, "call-scratch-correction"));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Subagent_reviewed_safe_external_cwd_receives_project_scope_correction_before_bridge(
+        bool supportsApproval)
+    {
+        const string callId = "call-project-scope-correction";
+        var approvalBridge = supportsApproval
+            ? new RecordingParentApprovalBridge(ParentApprovalDecision.ApprovedOnce)
+            : null;
+        var scenario = await RunProjectScopeScenarioAsync(
+            callId,
+            includeScopeTool: true,
+            scopeToolAccepts: true,
+            approvalBridge);
+
+        Assert.True(scenario.Result.Success, scenario.Result.Output);
+        Assert.False(scenario.Shell.WasCalled);
+        Assert.Equal(0, approvalBridge?.RequestCount ?? 0);
+        var correction = GetLastToolResult(scenario.Client, callId);
+        Assert.Contains("working_directory_not_declared", correction, StringComparison.Ordinal);
+        Assert.Contains(scenario.Worktree, correction, StringComparison.Ordinal);
+        Assert.Contains(SetWorkingDirectoryTool.ToolName, correction, StringComparison.Ordinal);
+        var preservedCall = scenario.Client.LastReceivedMessages!
+            .SelectMany(message => message.Contents.OfType<FunctionCallContent>())
+            .Single(call => call.CallId == callId);
+        Assert.Equal(ProjectScopeCommand, preservedCall.Arguments!["Command"]);
+    }
+
+    [Theory]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    public async Task Subagent_unavailable_project_scope_keeps_parent_approval_bridge(
+        bool includeScopeTool,
+        bool scopeToolAccepts)
+    {
+        const string callId = "call-project-scope-approval";
+        var approvalBridge = new RecordingParentApprovalBridge(ParentApprovalDecision.ApprovedOnce);
+        var scenario = await RunProjectScopeScenarioAsync(
+            callId,
+            includeScopeTool,
+            scopeToolAccepts,
+            approvalBridge);
+
+        Assert.True(scenario.Result.Success, scenario.Result.Output);
+        Assert.True(scenario.Shell.WasCalled);
+        Assert.Equal(1, approvalBridge.RequestCount);
+        Assert.Equal(scenario.Worktree, approvalBridge.RequestedCwd);
+        Assert.DoesNotContain(
+            "working_directory_not_declared",
+            GetLastToolResult(scenario.Client, callId),
+            StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Subagent_project_declaration_updates_child_prompt_before_unchanged_retry(
+        bool supportsApproval)
+    {
+        const string firstCallId = "call-project-scope-first";
+        const string declarationCallId = "call-project-scope-declare";
+        const string retryCallId = "call-project-scope-retry";
+        const string projectGuidance = "Project instructions: use the local test conventions.";
+        var worktree = Path.GetFullPath(AppContext.BaseDirectory);
+        var shell = new FakeNetclawTool(ShellTool.ToolName, "inspected");
+        var setWorkingDirectory = new SetWorkingDirectoryTool(
+            new ToolConfig(),
+            new NetclawPaths(worktree, worktree));
+        var client = new SequencedToolCallChatClient(
+        [
+            ProjectScopeCall(firstCallId, worktree),
+            new FunctionCallContent(
+                declarationCallId,
+                SetWorkingDirectoryTool.ToolName,
+                new Dictionary<string, object?> { ["Path"] = worktree }),
+            ProjectScopeCall(retryCallId, worktree)
+        ]);
+        var approvalBridge = supportsApproval
+            ? new RecordingParentApprovalBridge(ParentApprovalDecision.ApprovedOnce)
+            : null;
+        var actor = Sys.ActorOf(SubAgentActor.CreatePropsWithProjectInstructionProvider(
+            CreateDefinition([shell, setWorkingDirectory]),
+            client,
+            CreateProjectScopeCorrectionPolicy(worktree),
+            new ProjectPromptProvider(worktree, projectGuidance)));
+
+        var result = await actor.Ask<SubAgentResult>(
+            new RunSubAgent
+            {
+                Scope = SubAgentTestScope.Create(approvalBridge: approvalBridge),
+                Task = "Declare the project and retry the exact inspection.",
+                Timeout = TimeSpan.FromSeconds(5)
+            },
+            ApprovalAskTimeout,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(supportsApproval, result.Success);
+        Assert.Equal(supportsApproval, shell.WasCalled);
+        Assert.Equal(0, approvalBridge?.RequestCount ?? 0);
+        Assert.Contains(
+            projectGuidance,
+            client.LastReceivedMessages!.Single(message => message.Role == ChatRole.System).Text,
+            StringComparison.Ordinal);
+
+        if (supportsApproval)
+        {
+            Assert.Equal(worktree, result.WorkingContext!.ProjectDirectory);
+            var parent = new WorkingContext { ProjectDirectory = "/parent/project" };
+            var merged = LlmSessionActor.MergeSuccessfulSubAgentWorkingContext(parent, result.Completion);
+            Assert.Equal("/parent/project", merged.ProjectDirectory);
+        }
+    }
+
+    [Theory]
+    [InlineData("\0")]
+    [InlineData("\r")]
+    [InlineData("\n")]
+    public async Task Subagent_rejects_control_characters_from_project_scope_result(string controlCharacter)
+    {
+        const string projectGuidance = "Project instructions that must not load.";
+        var worktree = Path.GetFullPath(AppContext.BaseDirectory);
+        var controlledDirectory = Path.Combine(worktree, $"project-{controlCharacter}-candidate");
+        var setWorkingDirectory = new SetWorkingDirectoryTool(
+            new ToolConfig(),
+            new NetclawPaths(worktree, worktree));
+        var client = new SequencedToolCallChatClient(
+        [
+            new FunctionCallContent(
+                "call-control-project",
+                SetWorkingDirectoryTool.ToolName,
+                new Dictionary<string, object?> { ["Path"] = controlledDirectory })
+        ]);
+        var promptProvider = new ProjectPromptProvider(controlledDirectory, projectGuidance);
+        var actor = Sys.ActorOf(SubAgentActor.CreatePropsWithProjectInstructionProvider(
+            CreateDefinition([setWorkingDirectory]),
+            client,
+            PermissivePolicy(),
+            promptProvider));
+
+        var result = await actor.Ask<SubAgentResult>(
+            new RunSubAgent
+            {
+                Scope = SubAgentTestScope.Create(),
+                Task = "Try to declare the project.",
+                Timeout = TimeSpan.FromSeconds(5)
+            },
+            ApprovalAskTimeout,
+            TestContext.Current.CancellationToken);
+
+        Assert.True(result.Success, result.Output);
+        Assert.Null(result.WorkingContext!.ProjectDirectory);
+        Assert.Equal(
+            "Error: path contains an invalid control character.",
+            GetLastToolResult(client.LastReceivedMessages, "call-control-project"));
+        Assert.DoesNotContain(controlledDirectory, result.Output, StringComparison.Ordinal);
+        Assert.Equal(0, promptProvider.CallCount);
+        Assert.DoesNotContain(
+            projectGuidance,
+            client.LastReceivedMessages!.Single(message => message.Role == ChatRole.System).Text,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Subagent_parallel_temp_calls_both_receive_first_attempt_corrections()
+    {
+        var fakeTool = new FakeNetclawTool(ShellTool.ToolName, "should not run");
+        var fakeClient = new FakeChatClient
+        {
+            ToolCallsOnFirstCall =
+            [
+                ScratchCall("call-scratch-parallel-1"),
+                ScratchCall("call-scratch-parallel-2")
+            ]
+        };
+        var approvalBridge = new RecordingParentApprovalBridge(ParentApprovalDecision.ApprovedOnce);
+        var agent = Sys.ActorOf(SubAgentActor.CreateProps(
+            CreateDefinition([fakeTool]),
+            fakeClient,
+            CreateScratchCorrectionPolicy()));
+
+        var result = await agent.Ask<SubAgentResult>(
+            new RunSubAgent
+            {
+                Scope = SubAgentTestScope.Create(
+                    sessionDirectory: "/home/user/.netclaw/sessions/example",
+                    approvalBridge: approvalBridge),
+                Task = "Inspect two disposable diagnostic artifacts.",
+                Timeout = TimeSpan.FromSeconds(5)
+            },
+            ApprovalAskTimeout,
+            TestContext.Current.CancellationToken);
+
+        Assert.True(result.Success, result.Output);
+        Assert.False(fakeTool.WasCalled);
+        Assert.Equal(0, approvalBridge.RequestCount);
+        Assert.Contains(
+            "shared_temporary_directory",
+            GetLastToolResult(fakeClient, "call-scratch-parallel-1"));
+        Assert.Contains(
+            "shared_temporary_directory",
+            GetLastToolResult(fakeClient, "call-scratch-parallel-2"));
+    }
+
+    [Fact]
+    public async Task Subagent_exact_temp_retry_reaches_once_or_deny_parent_bridge()
+    {
+        var fakeTool = new FakeNetclawTool(ShellTool.ToolName, "should not run");
+        var fakeClient = new SequencedToolCallChatClient(
+        [
+            ScratchCall("call-scratch-first"),
+            ScratchCall("call-scratch-retry")
+        ]);
+        var approvalBridge = new RecordingParentApprovalBridge(ParentApprovalDecision.Denied);
+        var agent = Sys.ActorOf(SubAgentActor.CreateProps(
+            CreateDefinition([fakeTool]),
+            fakeClient,
+            CreateScratchCorrectionPolicy()));
+
+        var result = await agent.Ask<SubAgentResult>(
+            new RunSubAgent
+            {
+                Scope = SubAgentTestScope.Create(
+                    sessionDirectory: "/home/user/.netclaw/sessions/example",
+                    approvalBridge: approvalBridge),
+                Task = "Retry the exact disposable diagnostic call if corrected.",
+                Timeout = TimeSpan.FromSeconds(5)
+            },
+            ApprovalAskTimeout,
+            TestContext.Current.CancellationToken);
+
+        Assert.True(result.Success, result.Output);
+        Assert.False(fakeTool.WasCalled);
+        Assert.Equal(1, approvalBridge.RequestCount);
+        Assert.Equal(
+            [ApprovalOptionKeys.ApproveOnce, ApprovalOptionKeys.Deny],
+            approvalBridge.RequestedOptions.Select(option => option.Key));
+        var denial = GetLastToolResult(fakeClient.LastReceivedMessages, "call-scratch-retry");
+        Assert.Contains("approval_denied_by_user", denial, StringComparison.Ordinal);
+        Assert.Contains("/home/user/.netclaw/sessions/example", denial, StringComparison.Ordinal);
+        Assert.DoesNotContain("set_working_directory", denial, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -899,6 +1234,16 @@ public class SubAgentActorTests : TestKit
         Assert.False(fakeTool.WasCalled);
     }
 
+    private static ToolAccessPolicy PermissivePolicy() => new(
+        new ToolConfig { ShellMode = ShellExecutionMode.HostAllowed },
+        new EffectivePolicyDefaults(
+            DeploymentPosture.Personal,
+            TrustAudience.Personal,
+            ShellExecutionMode.HostAllowed,
+            UsedStrictFallback: false),
+        new ShellCommandPolicy(),
+        new ToolPathPolicy([]));
+
     private static ToolAccessPolicy CreateApprovalRequiredPolicy()
     {
         var toolConfig = new ToolConfig { ShellMode = ShellExecutionMode.HostAllowed };
@@ -916,16 +1261,185 @@ public class SubAgentActorTests : TestKit
                 TrustAudience.Personal,
                 ShellExecutionMode.HostAllowed,
                 UsedStrictFallback: false),
-            new ShellCommandPolicy());
+            new ShellCommandPolicy(),
+            new ToolPathPolicy([]));
     }
+
+    private static ToolAccessPolicy CreateScratchCorrectionPolicy()
+    {
+        var toolConfig = new ToolConfig { ShellMode = ShellExecutionMode.HostAllowed };
+        toolConfig.AudienceProfiles.Personal.ApprovalPolicy = new ToolApprovalConfig
+        {
+            ToolOverrides = new Dictionary<string, ToolApprovalMode>(StringComparer.Ordinal)
+            {
+                [ShellTool.ToolName] = ToolApprovalMode.Approval
+            }
+        };
+        var environment = ShellExecutionEnvironment.CreateBash(ShellPlatform.Linux);
+        var commandPolicy = new ShellCommandPolicy(environment);
+        var pathPolicy = new ToolPathPolicy(environment, []);
+        return new ToolAccessPolicy(
+            toolConfig,
+            new EffectivePolicyDefaults(
+                DeploymentPosture.Personal,
+                TrustAudience.Personal,
+                ShellExecutionMode.HostAllowed,
+                UsedStrictFallback: false),
+            commandPolicy,
+            pathPolicy,
+            new PlatformTemporaryScopePolicy(
+                environment,
+                "/tmp",
+                new AlwaysSafeTemporaryPathInspector()));
+    }
+
+    private async Task<ProjectScopeScenario> RunProjectScopeScenarioAsync(
+        string callId,
+        bool includeScopeTool,
+        bool scopeToolAccepts,
+        IParentApprovalBridge? approvalBridge)
+    {
+        var worktree = Path.GetFullPath(AppContext.BaseDirectory);
+        var shell = new FakeNetclawTool(ShellTool.ToolName, "approved");
+        var tools = new List<INetclawTool> { shell };
+        if (includeScopeTool)
+        {
+            var allowedRoot = scopeToolAccepts
+                ? worktree
+                : Path.Combine(worktree, "different-workspace-root");
+            tools.Add(new SetWorkingDirectoryTool(
+                new ToolConfig(),
+                new NetclawPaths(allowedRoot, allowedRoot)));
+        }
+
+        var client = new FakeChatClient
+        {
+            ToolCallsOnFirstCall = [ProjectScopeCall(callId, worktree)]
+        };
+        var agent = Sys.ActorOf(SubAgentActor.CreateProps(
+            CreateDefinition(tools),
+            client,
+            CreateProjectScopeCorrectionPolicy(worktree)));
+        var result = await agent.Ask<SubAgentResult>(
+            new RunSubAgent
+            {
+                Scope = SubAgentTestScope.Create(approvalBridge: approvalBridge),
+                Task = "Inspect project metrics.",
+                Timeout = TimeSpan.FromSeconds(5)
+            },
+            ApprovalAskTimeout,
+            TestContext.Current.CancellationToken);
+
+        return new ProjectScopeScenario(result, shell, client, worktree);
+    }
+
+    private sealed record ProjectScopeScenario(
+        SubAgentResult Result,
+        FakeNetclawTool Shell,
+        FakeChatClient Client,
+        string Worktree);
+
+    private sealed class ProjectPromptProvider(
+        string expectedProjectDirectory,
+        string projectInstructions) : ISystemPromptProvider
+    {
+        public int CallCount { get; private set; }
+
+        public string GetSystemPrompt(TrustAudience audience, string? projectDirectory = null)
+            => string.Empty;
+
+        public string? GetProjectInstructions(TrustAudience audience, string? projectDirectory)
+        {
+            CallCount++;
+            return string.Equals(projectDirectory, expectedProjectDirectory, StringComparison.Ordinal)
+                ? projectInstructions
+                : null;
+        }
+
+        public string? GetOperatingRules(TrustAudience audience) => null;
+    }
+
+    private static ToolAccessPolicy CreateProjectScopeCorrectionPolicy(string workspacesDirectory)
+    {
+        var toolConfig = new ToolConfig { ShellMode = ShellExecutionMode.HostAllowed };
+        toolConfig.AudienceProfiles.Personal.ApprovalPolicy = new ToolApprovalConfig
+        {
+            ToolOverrides = new Dictionary<string, ToolApprovalMode>(StringComparer.Ordinal)
+            {
+                [ShellTool.ToolName] = ToolApprovalMode.Approval
+            }
+        };
+        var environment = TestShellEnvironment.Current;
+        var approvalShell = environment.Grammar == ShellGrammar.Bash
+            ? ApprovalShell.Bash
+            : ApprovalShell.PowerShell;
+        var safeVerbs = environment.Grammar == ShellGrammar.Bash
+            ? new[] { "pwd", "whoami" }
+            : ["Get-Location", "Get-Date"];
+        return new ToolAccessPolicy(
+            toolConfig,
+            new EffectivePolicyDefaults(
+                DeploymentPosture.Personal,
+                TrustAudience.Personal,
+                ShellExecutionMode.HostAllowed,
+                UsedStrictFallback: false),
+            new ShellCommandPolicy(environment),
+            new ToolPathPolicy(environment, []),
+            shellTrustZonePolicy: new ShellTrustZonePolicy(
+                toolConfig,
+                new NetclawPaths(workspacesDirectory, workspacesDirectory)),
+            safeVerbs: SafeVerbList.FromVerbs(approvalShell, safeVerbs));
+    }
+
+    private static FunctionCallContent ScratchCall(string callId)
+        => new(callId, ShellTool.ToolName, new Dictionary<string, object?>
+        {
+            ["Command"] = "gh api repos/example/project",
+            ["WorkingDirectory"] = "/tmp"
+        });
+
+    private static FunctionCallContent ProjectScopeCall(string callId, string workingDirectory)
+        => new(callId, ShellTool.ToolName, new Dictionary<string, object?>
+        {
+            ["Command"] = ProjectScopeCommand,
+            ["WorkingDirectory"] = workingDirectory
+        });
+
+    private static string ProjectScopeCommand =>
+        TestShellEnvironment.Current.Grammar == ShellGrammar.Bash
+            ? "pwd; whoami"
+            : "Get-Location; Get-Date";
 
     private static string? GetLastToolResult(FakeChatClient fakeClient, string callId)
     {
         Assert.NotNull(fakeClient.LastReceivedMessages);
-        return fakeClient.LastReceivedMessages!
+        return GetLastToolResult(fakeClient.LastReceivedMessages, callId);
+    }
+
+    private static string? GetLastToolResult(
+        IReadOnlyList<ChatMessage>? messages,
+        string callId)
+    {
+        Assert.NotNull(messages);
+        return messages
             .SelectMany(m => m.Contents.OfType<FunctionResultContent>())
             .Single(r => r.CallId == callId)
             .Result?.ToString();
+    }
+
+    private sealed class AlwaysSafeTemporaryPathInspector : IPlatformTemporaryPathInspector
+    {
+        public bool TryResolveRoot(
+            string path,
+            ShellPathStyle pathStyle,
+            out string resolvedRoot)
+            => ShellPathRules.TryNormalize(path, pathStyle, out resolvedRoot);
+
+        public bool IsSafeDescendant(string root, string path, ShellPathStyle pathStyle)
+            => true;
+
+        public bool ContainsInvalidPathState(string path, ShellPathStyle pathStyle)
+            => false;
     }
 
     private static void AssertPromptOrder(string prompt, params string[] markers)
@@ -988,6 +1502,7 @@ public class SubAgentActorTests : TestKit
         var agent = Sys.ActorOf(SubAgentActor.CreateProps(
             definition,
             fakeClient,
+            PermissivePolicy(),
             maxToolIterations: 3));
 
         var result = await agent.Ask<SubAgentResult>(
@@ -1016,7 +1531,7 @@ public class SubAgentActorTests : TestKit
             Delay = TimeSpan.FromSeconds(30) // Much longer than timeout
         };
         var definition = CreateDefinition();
-        var agent = Sys.ActorOf(SubAgentActor.CreateProps(definition, fakeClient));
+        var agent = Sys.ActorOf(SubAgentActor.CreateProps(definition, fakeClient, PermissivePolicy()));
 
         var result = await agent.Ask<SubAgentResult>(
             // No first token ever arrives, so the prefill liveness budget governs;
@@ -1049,7 +1564,7 @@ public class SubAgentActorTests : TestKit
     {
         // The model never produces a first token (the stream parks). The prefill
         // ceiling bounds the call even though the inter-delta budget is large.
-        var agent = Sys.ActorOf(SubAgentActor.CreateProps(CreateDefinition(), new ParkingChatClient()));
+        var agent = Sys.ActorOf(SubAgentActor.CreateProps(CreateDefinition(), new ParkingChatClient(), PermissivePolicy()));
 
         var result = await agent.Ask<SubAgentResult>(
             new RunSubAgent
@@ -1073,7 +1588,7 @@ public class SubAgentActorTests : TestKit
         // token, so the no-progress deadline fires first and reports the
         // no-substantive-output reason. (That keepalives refresh the liveness timer
         // yet never reset this deadline is proven in ProcessingWatchdogTests.)
-        var agent = Sys.ActorOf(SubAgentActor.CreateProps(CreateDefinition(), new ParkingChatClient()));
+        var agent = Sys.ActorOf(SubAgentActor.CreateProps(CreateDefinition(), new ParkingChatClient(), PermissivePolicy()));
 
         var result = await agent.Ask<SubAgentResult>(
             new RunSubAgent
@@ -1150,7 +1665,7 @@ public class SubAgentActorTests : TestKit
     {
         var throwingClient = new FakeChatClient { Failure = new InvalidOperationException("LLM connection failed") };
         var definition = CreateDefinition();
-        var agent = Sys.ActorOf(SubAgentActor.CreateProps(definition, throwingClient));
+        var agent = Sys.ActorOf(SubAgentActor.CreateProps(definition, throwingClient, PermissivePolicy()));
 
         var result = await agent.Ask<SubAgentResult>(
             new RunSubAgent { Scope = SubAgentTestScope.Create(), Task = "Fail", Timeout = TimeSpan.FromSeconds(5) },
@@ -1166,7 +1681,7 @@ public class SubAgentActorTests : TestKit
     {
         var fakeClient = new FakeChatClient();
         var definition = CreateDefinition();
-        var agent = Sys.ActorOf(SubAgentActor.CreateProps(definition, fakeClient));
+        var agent = Sys.ActorOf(SubAgentActor.CreateProps(definition, fakeClient, PermissivePolicy()));
         Watch(agent);
 
         agent.Tell(new RunSubAgent { Scope = SubAgentTestScope.Create(), Task = "Done", Timeout = TimeSpan.FromSeconds(5) });
@@ -1206,7 +1721,8 @@ public class SubAgentActorTests : TestKit
                 TrustAudience.Personal,
                 ShellExecutionMode.HostAllowed,
                 UsedStrictFallback: false),
-            new ShellCommandPolicy());
+            new ShellCommandPolicy(),
+            new ToolPathPolicy([]));
 
         var definition = CreateDefinition([fakePlaywrightTool]);
         var agent = Sys.ActorOf(SubAgentActor.CreateProps(definition, fakeClient, policy, approvalService: null));
@@ -1237,7 +1753,7 @@ public class SubAgentActorTests : TestKit
             ResponseText = "This is a durable subagent summary with enough detail to be considered a memory candidate for parent-session checkpoint review."
         };
         var definition = CreateDefinition();
-        var agent = Sys.ActorOf(SubAgentActor.CreateProps(definition, fakeClient));
+        var agent = Sys.ActorOf(SubAgentActor.CreateProps(definition, fakeClient, PermissivePolicy()));
 
         var result = await agent.Ask<SubAgentResult>(
             new RunSubAgent { Scope = SubAgentTestScope.Create(), Task = "Summarize research", Timeout = TimeSpan.FromSeconds(5) },
@@ -1258,7 +1774,7 @@ public class SubAgentActorTests : TestKit
             ResponseText = longSummary
         };
         var definition = CreateDefinition() with { EmitStructuredFindings = true };
-        var agent = Sys.ActorOf(SubAgentActor.CreateProps(definition, fakeClient));
+        var agent = Sys.ActorOf(SubAgentActor.CreateProps(definition, fakeClient, PermissivePolicy()));
 
         var result = await agent.Ask<SubAgentResult>(
             new RunSubAgent { Scope = SubAgentTestScope.Create(), Task = "Summarize research", Timeout = TimeSpan.FromSeconds(5) },
@@ -1281,7 +1797,7 @@ public class SubAgentActorTests : TestKit
     {
         var fakeClient = new FakeChatClient();
         var definition = CreateDefinition();
-        var agent = Sys.ActorOf(SubAgentActor.CreateProps(definition, fakeClient));
+        var agent = Sys.ActorOf(SubAgentActor.CreateProps(definition, fakeClient, PermissivePolicy()));
 
         var result = await agent.Ask<SubAgentResult>(
             new RunSubAgent
@@ -1312,7 +1828,7 @@ public class SubAgentActorTests : TestKit
     {
         var fakeClient = new FakeChatClient();
         var definition = CreateDefinition();
-        var agent = Sys.ActorOf(SubAgentActor.CreateProps(definition, fakeClient));
+        var agent = Sys.ActorOf(SubAgentActor.CreateProps(definition, fakeClient, PermissivePolicy()));
 
         var result = await agent.Ask<SubAgentResult>(
             new RunSubAgent
@@ -1333,7 +1849,7 @@ public class SubAgentActorTests : TestKit
     public async Task Parent_working_context_is_injected_into_child_user_message()
     {
         var fakeClient = new FakeChatClient();
-        var agent = Sys.ActorOf(SubAgentActor.CreateProps(CreateDefinition(), fakeClient));
+        var agent = Sys.ActorOf(SubAgentActor.CreateProps(CreateDefinition(), fakeClient, PermissivePolicy()));
 
         var result = await agent.Ask<SubAgentResult>(
             new RunSubAgent
@@ -1366,7 +1882,7 @@ public class SubAgentActorTests : TestKit
                     new Dictionary<string, object?> { ["Path"] = "src/Calculator.cs" })
             ]
         };
-        var agent = Sys.ActorOf(SubAgentActor.CreateProps(CreateDefinition([editTool]), fakeClient));
+        var agent = Sys.ActorOf(SubAgentActor.CreateProps(CreateDefinition([editTool]), fakeClient, PermissivePolicy()));
 
         var result = await agent.Ask<SubAgentResult>(
             new RunSubAgent
@@ -1397,7 +1913,7 @@ public class SubAgentActorTests : TestKit
                     new Dictionary<string, object?> { ["Path"] = "src/Calculator.cs" })
             ]
         };
-        var agent = Sys.ActorOf(SubAgentActor.CreateProps(CreateDefinition([editTool]), fakeClient));
+        var agent = Sys.ActorOf(SubAgentActor.CreateProps(CreateDefinition([editTool]), fakeClient, PermissivePolicy()));
 
         var result = await agent.Ask<SubAgentResult>(
             new RunSubAgent
@@ -1558,6 +2074,8 @@ internal sealed class SequencedToolCallChatClient(IReadOnlyList<FunctionCallCont
 {
     private int _callCount;
 
+    public IReadOnlyList<ChatMessage>? LastReceivedMessages { get; private set; }
+
     public Task<ChatResponse> GetResponseAsync(
         IEnumerable<ChatMessage> messages,
         ChatOptions? options = null,
@@ -1570,7 +2088,10 @@ internal sealed class SequencedToolCallChatClient(IReadOnlyList<FunctionCallCont
         IEnumerable<ChatMessage> messages,
         ChatOptions? options = null,
         CancellationToken cancellationToken = default)
-        => CreateStreamingUpdatesAsync(cancellationToken);
+    {
+        LastReceivedMessages = messages.ToList();
+        return CreateStreamingUpdatesAsync(cancellationToken);
+    }
 
     private async IAsyncEnumerable<ChatResponseUpdate> CreateStreamingUpdatesAsync(
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
@@ -1586,7 +2107,7 @@ internal sealed class SequencedToolCallChatClient(IReadOnlyList<FunctionCallCont
         else
         {
             response = new ChatResponse(
-                new ChatMessage(ChatRole.Assistant, [new TextContent("[fake] finished") ]));
+                new ChatMessage(ChatRole.Assistant, [new TextContent("[fake] finished")]));
         }
 
         foreach (var update in response.ToChatResponseUpdates())

@@ -1,4 +1,4 @@
-﻿// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
 // <copyright file="ProviderStepViewModel.cs" company="Petabridge, LLC">
 //      Copyright (C) 2026 - 2026 Petabridge, LLC <https://petabridge.com>
 // </copyright>
@@ -462,10 +462,7 @@ public sealed class ProviderStepViewModel : IWizardStepViewModel, ISectionEditor
         {
             Provider = providerName,
             ModelId = SelectedModelId,
-            ContextWindow = selectedModel?.ContextWindowTokens,
             Provenance = selectedModel is null ? ModelDiscoverySource.Manual : ModelDiscoverySource.Live,
-            InputModalities = selectedModel?.InputModalities,
-            OutputModalities = selectedModel?.OutputModalities,
         };
     }
 

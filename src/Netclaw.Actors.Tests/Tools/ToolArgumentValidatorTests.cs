@@ -25,6 +25,9 @@ public class ToolArgumentValidatorTests
 
     public ToolArgumentValidatorTests()
     {
+        var environment = TestShellEnvironment.Current;
+        var commandPolicy = new ShellCommandPolicy(environment);
+        var pathPolicy = new ToolPathPolicy(environment, []);
         var config = new ToolConfig();
         config.AudienceProfiles.Personal.ApprovalPolicy = new ToolApprovalConfig
         {
@@ -35,7 +38,7 @@ public class ToolArgumentValidatorTests
         };
 
         var registry = new ToolRegistry();
-        registry.WithFirstPartyTools(config, new NetclawPaths(), new ToolPathPolicy([]), new ShellCommandPolicy());
+        registry.WithFirstPartyTools(config, new NetclawPaths(), pathPolicy, commandPolicy);
         _executor = new DispatchingToolExecutor(
             registry,
             new ToolAccessPolicy(
@@ -44,7 +47,9 @@ public class ToolArgumentValidatorTests
                     DeploymentPosture.Personal,
                     TrustAudience.Personal,
                     ShellExecutionMode.HostAllowed,
-                    UsedStrictFallback: false)));
+                    UsedStrictFallback: false),
+                commandPolicy,
+                pathPolicy));
     }
 
     private static ToolExecutionContext PersonalContext(string sessionDir)
@@ -271,7 +276,17 @@ public class ToolArgumentValidatorTests
         var fakeTool = AIFunctionFactory.Create(() => "mcp-result", "store");
         var registry = new ToolRegistry();
         registry.Register(new McpToolAdapter(fakeTool, "memorizer", "store"));
-        var executor = new DispatchingToolExecutor(registry);
+        var executor = new DispatchingToolExecutor(
+            registry,
+            new ToolAccessPolicy(
+                new ToolConfig { ShellMode = ShellExecutionMode.HostAllowed },
+                new EffectivePolicyDefaults(
+                    DeploymentPosture.Personal,
+                    TrustAudience.Personal,
+                    ShellExecutionMode.HostAllowed,
+                    UsedStrictFallback: false),
+                new ShellCommandPolicy(),
+                new ToolPathPolicy([])));
 
         string result;
         try
@@ -303,7 +318,17 @@ public class ToolArgumentValidatorTests
         var fakeTool = AIFunctionFactory.Create(() => "mcp-result", "store");
         var registry = new ToolRegistry();
         registry.Register(new McpToolAdapter(fakeTool, "memorizer", "store"));
-        var executor = new DispatchingToolExecutor(registry);
+        var executor = new DispatchingToolExecutor(
+            registry,
+            new ToolAccessPolicy(
+                new ToolConfig { ShellMode = ShellExecutionMode.HostAllowed },
+                new EffectivePolicyDefaults(
+                    DeploymentPosture.Personal,
+                    TrustAudience.Personal,
+                    ShellExecutionMode.HostAllowed,
+                    UsedStrictFallback: false),
+                new ShellCommandPolicy(),
+                new ToolPathPolicy([])));
 
         var rejection = executor.ValidateToolCall(new FunctionCallContent(
             "call-mcp", "memorizer/store", new Dictionary<string, object?>

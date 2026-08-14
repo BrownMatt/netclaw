@@ -6,6 +6,7 @@
 #   curl -sSL https://releases.netclaw.dev/install.sh | bash -s -- cli            # CLI only
 #   curl -sSL https://releases.netclaw.dev/install.sh | bash -s -- daemon         # Daemon only
 #   curl -sSL https://releases.netclaw.dev/install.sh | bash -s -- --channel beta # Opt into prereleases
+#   curl -sSL https://releases.netclaw.dev/install.sh | bash -s -- --skip-shell   # Don't modify shell profile
 #   INSTALL_DIR=/opt/netclaw curl -sSL https://releases.netclaw.dev/install.sh | bash
 #
 # Arguments:
@@ -13,10 +14,12 @@
 #   --channel stable|beta   — Release channel (default: stable). 'beta' installs the
 #                             newest prerelease (or latest stable if no prerelease exists).
 #   --dry-run               — Resolve and report what would happen; install nothing.
+#   --skip-shell            — Skip automatic shell profile modification.
 #
 # Environment variables:
 #   INSTALL_DIR     — Install directory (default: ~/.netclaw/bin)
 #   NETCLAW_VERSION — Specific version to install (overrides --channel; e.g. 0.19.0-beta.1)
+#   FEED_BASE_URL   — Release feed URL (default: https://releases.netclaw.dev)
 
 set -euo pipefail
 
@@ -27,18 +30,19 @@ else
     CURL_PROGRESS=(-s)
 fi
 
-# MANIFEST_URL is overridable so the script can be pointed at a local manifest
-# (smoke tests) or a private mirror.
-MANIFEST_URL="${MANIFEST_URL:-https://releases.netclaw.dev/manifest.json}"
+# Feed base URL can point at a private mirror or a local smoke-test server.
+FEED_BASE_URL="${FEED_BASE_URL:-https://releases.netclaw.dev}"
 
 # ── Argument parsing ──
 COMPONENT="all"        # "all", "cli", or "daemon"
 DRY_RUN=false          # --dry-run: resolve and report what would happen, install nothing
 CHANNEL="stable"       # release channel: "stable" (default) or "beta" (opt into prereleases)
 CHANNEL_EXPLICIT=false # true when --channel was explicitly passed
+SKIP_SHELL=false       # --skip-shell: don't modify shell profile
 while [ $# -gt 0 ]; do
     case "$1" in
         --dry-run) DRY_RUN=true; shift ;;
+        --skip-shell) SKIP_SHELL=true; shift ;;
         --channel)
             if [ $# -lt 2 ]; then
                 echo "Error: --channel requires a value (stable|beta)" >&2; exit 1
@@ -46,7 +50,7 @@ while [ $# -gt 0 ]; do
             CHANNEL="$2"; CHANNEL_EXPLICIT=true; shift 2 ;;
         --channel=*) CHANNEL="${1#*=}"; CHANNEL_EXPLICIT=true; shift ;;
         all|cli|daemon) COMPONENT="$1"; shift ;;
-        *) echo "Usage: install.sh [all|cli|daemon] [--channel stable|beta] [--dry-run]" >&2; exit 1 ;;
+        *) echo "Usage: install.sh [all|cli|daemon] [--channel stable|beta] [--dry-run] [--skip-shell]" >&2; exit 1 ;;
     esac
 done
 
@@ -121,15 +125,14 @@ sha256_file() {
     fi
 }
 
-# ── JSON field extraction (no jq dependency) ──
-# Uses jq if available, falls back to grep/sed
-json_field() {
-    local json="$1" field="$2"
-    if command -v jq >/dev/null 2>&1; then
-        echo "$json" | jq -r "$field"
-    else
-        # Simple grep/sed fallback for flat JSON fields
-        echo "$json" | grep -o "\"${field#.}\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" | head -1 | sed 's/.*: *"\(.*\)"/\1/'
+validate_install_dir_for_path() {
+    local install_dir="$1"
+
+    # PATH uses ':' as its entry separator, and startup files are line-oriented.
+    # These names cannot be represented without changing their meaning.
+    if [[ "$install_dir" == *:* || "$install_dir" == *$'\n'* || "$install_dir" == *$'\r'* ]]; then
+        echo "Error: INSTALL_DIR cannot contain ':', carriage returns, or newlines when used on PATH." >&2
+        return 1
     fi
 }
 
@@ -138,6 +141,7 @@ check_deps
 
 RID=$(detect_platform)
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.netclaw/bin}"
+validate_install_dir_for_path "$INSTALL_DIR"
 
 echo "Netclaw installer"
 echo "  Platform: $RID"
@@ -148,38 +152,62 @@ if [ "$DRY_RUN" = true ]; then
 fi
 echo ""
 
-# Fetch manifest
-echo "Fetching release manifest..."
-MANIFEST=$(curl -sSL --fail "$MANIFEST_URL") || {
-    echo "Error: Failed to fetch manifest from $MANIFEST_URL" >&2
-    exit 1
+# ── Version + asset resolution ──
+# The release feed has plain-text channel pointers. The shell installer does
+# not parse manifest.json.
+resolve_version() {
+    if [ -n "${NETCLAW_VERSION:-}" ]; then
+        VERSION="$NETCLAW_VERSION"
+        return 0
+    fi
+
+    local pointer="latest"
+    [ "$CHANNEL" = "beta" ] && pointer="latest-prerelease"
+    local pointer_url="$FEED_BASE_URL/$pointer"
+    local fetched
+    if ! fetched=$(curl -fsSL --max-time 10 "$pointer_url"); then
+        echo "Error: Failed to fetch release channel from $pointer_url" >&2
+        exit 1
+    fi
+    fetched="${fetched%$'\r'}"
+    if [ -z "$fetched" ] || [[ "$fetched" == *$'\n'* || "$fetched" == *$'\r'* || "$fetched" == *[[:space:]]* ]]; then
+        echo "Error: Release channel endpoint returned an invalid version: $pointer_url" >&2
+        exit 1
+    fi
+    VERSION="$fetched"
+    echo "  Resolved $CHANNEL channel from $pointer_url"
 }
 
-# Determine version. Precedence: explicit pin > channel selection > stable latest.
-if [ -n "${NETCLAW_VERSION:-}" ]; then
-    VERSION="$NETCLAW_VERSION"
-elif [ "$CHANNEL" = "beta" ]; then
-    # Beta channel resolves to latestPrerelease (the newest of {stable, prerelease}).
-    VERSION=$(json_field "$MANIFEST" ".latestPrerelease")
-    if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
-        # Manifest predates the prerelease channel — use latest stable and say so
-        # loudly. This is the newest known version, not a silent default.
-        echo "  Note: manifest has no prerelease channel; using latest stable." >&2
-        VERSION=$(json_field "$MANIFEST" ".latest")
+# ── Asset resolution ──
+# URL layout is deterministic: $FEED_BASE_URL/$VERSION/$component-$VERSION-$RID.{tar.gz|zip}.
+# Every archive requires a checksum from checksums-$RID.txt.
+resolve_asset() {
+    local component="$1"
+    local ext="tar.gz"
+    [ "$RID" = "win-x64" ] && ext="zip"
+    url="$FEED_BASE_URL/$VERSION/$component-$VERSION-$RID.$ext"
+
+    local checksum_url="$FEED_BASE_URL/$VERSION/checksums-$RID.txt"
+    local checksums
+    if ! checksums=$(curl -fsSL --max-time 10 "$checksum_url"); then
+        echo "  Error: Failed to fetch checksum file from $checksum_url" >&2
+        return 1
     fi
-else
-    VERSION=$(json_field "$MANIFEST" ".latest")
-fi
 
-if [ -z "$VERSION" ]; then
-    echo "Error: Could not determine latest version from manifest" >&2
-    exit 1
-fi
+    sha256=$(printf '%s\n' "$checksums" | awk -v f="$component-$VERSION-$RID.$ext" '$2 == f { print $1; exit }')
+    if [ -z "$sha256" ]; then
+        echo "  Error: No checksum found for $component-$VERSION-$RID.$ext" >&2
+        return 1
+    fi
 
+    return 0
+}
+
+resolve_version
 echo "  Version: $VERSION"
 echo ""
 
-# Parse assets using jq if available, otherwise use a simpler approach
+# Create a private download directory.
 TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
 
@@ -187,23 +215,11 @@ download_component() {
     local component="$1"
     local url sha256
 
-    if command -v jq >/dev/null 2>&1; then
-        url=$(echo "$MANIFEST" | jq -r ".releases[] | select(.version==\"$VERSION\") | .assets[] | select(.component==\"$component\" and .rid==\"$RID\") | .url")
-        sha256=$(echo "$MANIFEST" | jq -r ".releases[] | select(.version==\"$VERSION\") | .assets[] | select(.component==\"$component\" and .rid==\"$RID\") | .sha256")
-    else
-        # Fallback: extract URL and sha256 using grep (fragile but works for well-formed JSON)
-        # Find the block for this component+rid
-        local block
-        block=$(echo "$MANIFEST" | tr '\n' ' ' | grep -oP "\"component\"\\s*:\\s*\"${component}\"[^}]*\"rid\"\\s*:\\s*\"${RID}\"[^}]*}" | head -1)
-        if [ -z "$block" ]; then
-            # Try reversed order
-            block=$(echo "$MANIFEST" | tr '\n' ' ' | grep -oP "\"rid\"\\s*:\\s*\"${RID}\"[^}]*\"component\"\\s*:\\s*\"${component}\"[^}]*}" | head -1)
-        fi
-        url=$(echo "$block" | grep -oP '"url"\s*:\s*"\K[^"]+')
-        sha256=$(echo "$block" | grep -oP '"sha256"\s*:\s*"\K[^"]+')
+    if ! resolve_asset "$component"; then
+        return 1
     fi
 
-    if [ -z "$url" ] || [ "$url" = "null" ]; then
+    if [ -z "$url" ]; then
         echo "  Warning: No $component binary found for $RID in version $VERSION" >&2
         return 1
     fi
@@ -222,7 +238,7 @@ download_component() {
         return 1
     }
 
-    # Verify checksum
+    # Verify every archive before extraction.
     echo "  Verifying checksum..."
     local actual_sha
     actual_sha=$(sha256_file "$TMPDIR/$filename")
@@ -246,11 +262,18 @@ download_component() {
         return 1
     fi
 
-    mkdir -p "$INSTALL_DIR"
     cp "$binary_path" "$INSTALL_DIR/$binary_name"
     chmod +x "$INSTALL_DIR/$binary_name"
     echo "  Installed $binary_name to $INSTALL_DIR/"
 }
+
+if [ "$DRY_RUN" = false ]; then
+    # Resolve symlinks before installing so the exact path persisted into shell
+    # startup files is the same path that passed delimiter validation.
+    mkdir -p "$INSTALL_DIR"
+    INSTALL_DIR="$(cd "$INSTALL_DIR" && pwd -P)"
+    validate_install_dir_for_path "$INSTALL_DIR"
+fi
 
 # Download requested components
 SUCCESS=true
@@ -304,20 +327,178 @@ if [ "$CHANNEL_EXPLICIT" = true ]; then
     fi
 fi
 
-# PATH instructions
-echo ""
-if echo "$PATH" | tr ':' '\n' | grep -qx "$INSTALL_DIR"; then
-    echo "Installation complete! netclaw is already on your PATH."
+# ── Shell integration ─────────────────────────────────────────────────────
+# Bash and zsh source a small POSIX env file. Fish gets native syntax in its
+# dedicated conf.d file; fish cannot source POSIX `case ... esac` syntax.
+ENV_SCRIPT="$HOME/.netclaw/env"
+
+shell_quote() {
+    printf "'"
+    printf '%s' "$1" | sed "s/'/'\\\\''/g"
+    printf "'"
+}
+
+INSTALL_DIR_QUOTED="$(shell_quote "$INSTALL_DIR")"
+ENV_SCRIPT_QUOTED="$(shell_quote "$ENV_SCRIPT")"
+SOURCE_LINE=". $ENV_SCRIPT_QUOTED"
+MANUAL_PATH_LINE="export PATH=$INSTALL_DIR_QUOTED\${PATH:+:\"\$PATH\"}"
+
+detect_shell() {
+    # $SHELL is inherited from the parent login shell — it reflects the user's
+    # configured shell even when this script is piped via `curl | bash`.
+    local shell_name
+    shell_name="$(basename "${SHELL:-/bin/sh}")"
+    echo "$shell_name"
+}
+
+get_rc_file() {
+    local shell_name="$1" shell_path="$2"
+    local os
+    os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+
+    case "$shell_name" in
+        zsh)
+            local effective_zdotdir
+            # ZDOTDIR is often assigned without export in ~/.zshenv, so ask zsh
+            # for the value it actually uses rather than relying on Bash's env.
+            effective_zdotdir="$("$shell_path" -c "printf '%s' \"\${ZDOTDIR:-\$HOME}\"")" || return 1
+            if [[ -z "$effective_zdotdir" || "$effective_zdotdir" != /* || \
+                  "$effective_zdotdir" == *$'\n'* || "$effective_zdotdir" == *$'\r'* ]]; then
+                return 1
+            fi
+            echo "$effective_zdotdir/.zshrc"
+            ;;
+        bash)
+            if [ "$os" = "darwin" ]; then
+                # A login shell reads only the first existing file in this list.
+                if [ -f "$HOME/.bash_profile" ]; then
+                    echo "$HOME/.bash_profile"
+                elif [ -f "$HOME/.bash_login" ]; then
+                    echo "$HOME/.bash_login"
+                else
+                    echo "$HOME/.profile"
+                fi
+            else
+                echo "$HOME/.bashrc"
+            fi
+            ;;
+        *)
+            echo ""
+            ;;
+    esac
+}
+
+write_posix_env_script() {
+    mkdir -p "$(dirname "$ENV_SCRIPT")"
+    cat > "$ENV_SCRIPT" <<ENVEOF
+#!/bin/sh
+# netclaw shell setup
+netclaw_bin=$INSTALL_DIR_QUOTED
+case ":\${PATH:-}:" in
+    *:"\${netclaw_bin}":*)
+        ;;
+    *)
+        if [ -n "\${PATH:-}" ]; then
+            export PATH="\${netclaw_bin}:\${PATH}"
+        else
+            export PATH="\${netclaw_bin}"
+        fi
+        ;;
+esac
+unset netclaw_bin
+ENVEOF
+}
+
+modify_posix_rc_file() {
+    local rc_file="$1"
+    mkdir -p "$(dirname "$rc_file")"
+    touch "$rc_file"
+
+    if grep -qxF "$SOURCE_LINE" "$rc_file" 2>/dev/null; then
+        echo "  Shell profile '$rc_file' already sources netclaw."
+        return 0
+    fi
+
+    if [ -s "$rc_file" ] && [ "$(tail -c1 "$rc_file" | wc -l)" -eq 0 ]; then
+        echo "" >> "$rc_file"
+    fi
+
+    {
+        echo "# netclaw shell setup"
+        echo "$SOURCE_LINE"
+    } >> "$rc_file"
+
+    echo "  Modified '$rc_file' to add netclaw to PATH."
+}
+
+write_fish_config() {
+    local fish_config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d"
+    local fish_config="$fish_config_dir/netclaw.fish"
+    mkdir -p "$fish_config_dir"
+    cat > "$fish_config" <<FISHEOF
+# netclaw shell setup
+set -l netclaw_bin $INSTALL_DIR_QUOTED
+if not contains -- \$netclaw_bin \$PATH
+    set -gx PATH \$netclaw_bin \$PATH
+end
+FISHEOF
+    echo "  Wrote '$fish_config' to add netclaw to PATH."
+}
+
+if [ "$SKIP_SHELL" = false ]; then
+    SHELL_NAME="$(detect_shell)"
+    echo ""
+    echo "Setting up shell integration..."
+
+    case "$SHELL_NAME" in
+        bash)
+            RC_FILE="$(get_rc_file "$SHELL_NAME" "${SHELL:-/bin/bash}")"
+            write_posix_env_script
+            modify_posix_rc_file "$RC_FILE"
+            echo ""
+            echo "Installation complete! netclaw will be on PATH in new shells."
+            echo "To update this shell, run:"
+            echo ""
+            echo "  $SOURCE_LINE"
+            ;;
+        zsh)
+            if RC_FILE="$(get_rc_file "$SHELL_NAME" "${SHELL:-/bin/zsh}")"; then
+                write_posix_env_script
+                modify_posix_rc_file "$RC_FILE"
+                echo ""
+                echo "Installation complete! netclaw will be on PATH in new shells."
+                echo "To update this shell, run:"
+                echo ""
+                echo "  $SOURCE_LINE"
+            else
+                echo "  Could not safely resolve zsh's effective ZDOTDIR."
+                echo "  No shell profile was changed. Add this to the appropriate zsh profile:"
+                echo ""
+                echo "    $MANUAL_PATH_LINE"
+            fi
+            ;;
+        fish)
+            write_fish_config
+            echo ""
+            echo "Installation complete! netclaw will be on PATH in new fish shells."
+            echo "To update this shell, run:"
+            echo ""
+            echo "  set -gx PATH $INSTALL_DIR_QUOTED \$PATH"
+            ;;
+        *)
+            echo "  Shell '$SHELL_NAME' is not supported for automatic PATH setup."
+            echo "  No shell profile was changed. Add this directory to PATH using your shell's syntax:"
+            echo ""
+            echo "    $INSTALL_DIR"
+            ;;
+    esac
 else
-    echo "Installation complete!"
     echo ""
-    echo "Add Netclaw to your PATH by adding this to your shell profile:"
+    echo "Installation complete! (shell integration skipped)"
     echo ""
-    echo "  export PATH=\"$INSTALL_DIR:\$PATH\""
+    echo "Add netclaw to your PATH by adding this to your shell profile:"
     echo ""
-    echo "Then restart your shell or run:"
-    echo ""
-    echo "  source ~/.bashrc  # or ~/.zshrc"
+    echo "  $MANUAL_PATH_LINE"
 fi
 
 echo ""

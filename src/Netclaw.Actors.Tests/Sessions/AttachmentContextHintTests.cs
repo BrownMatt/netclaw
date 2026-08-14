@@ -1,4 +1,4 @@
-﻿// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
 // <copyright file="AttachmentContextHintTests.cs" company="Petabridge, LLC">
 //      Copyright (C) 2026 - 2026 Petabridge, LLC <https://petabridge.com>
 // </copyright>
@@ -22,6 +22,15 @@ public sealed class AttachmentContextHintTests
     public void Hint_names_the_inbox_subdirectory()
     {
         Assert.Contains("inbox/", SessionMessageAssembler.AttachmentContextHint, System.StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Hint_defines_the_announced_path_as_authoritative_and_session_relative()
+    {
+        Assert.Contains("path` is authoritative", SessionMessageAssembler.AttachmentContextHint, System.StringComparison.Ordinal);
+        Assert.Contains("relative to `session_dir`", SessionMessageAssembler.AttachmentContextHint, System.StringComparison.Ordinal);
+        Assert.Contains("collision-safe filename change", SessionMessageAssembler.AttachmentContextHint, System.StringComparison.Ordinal);
+        Assert.Contains("`{session_dir}/{path}`", SessionMessageAssembler.AttachmentContextHint, System.StringComparison.Ordinal);
     }
 
     [Fact]

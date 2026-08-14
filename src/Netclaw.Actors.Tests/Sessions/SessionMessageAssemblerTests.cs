@@ -363,18 +363,22 @@ public sealed class SessionMessageAssemblerTests
         Assert.DoesNotContain("media_dir:", text);
     }
 
-    [Fact]
-    public void Personal_audience_static_block_contains_filesystem_paths()
+    [Theory]
+    [InlineData(TrustAudience.Team)]
+    [InlineData(TrustAudience.Personal)]
+    public void Trusted_audience_static_block_contains_only_authoritative_session_root(TrustAudience audience)
     {
-        // Personal audience gets the full session block with directories.
-        var input = MakeInput(SeedHistory("hi"), activeRecall: null, audience: TrustAudience.Personal);
+        var input = MakeInput(SeedHistory("hi"), activeRecall: null, audience: audience);
         var messages = SessionMessageAssembler.Assemble(input);
 
         var staticBlock = messages[1];
         var text = staticBlock.Text ?? string.Empty;
 
         Assert.Contains("session_dir:", text);
-        Assert.Contains("media_dir:", text);
+        Assert.Contains("private scratch for disposable artifacts", text);
+        Assert.Contains("explicitly required platform temporary path unchanged", text);
+        Assert.Contains("does not automatically clean session scratch yet", text);
+        Assert.DoesNotContain("media_dir:", text);
     }
 
     [Fact]
@@ -416,9 +420,11 @@ public sealed class SessionMessageAssemblerTests
                 Audience = TrustAudience.Personal,
                 Boundary = TrustBoundary.Personal,
                 OutputLogPath = "/home/op/.netclaw/jobs/secret01/output.log"
-            }) with { History = SeedHistory("hi") };
+            }) with
+        { History = SeedHistory("hi") };
         var input = MakeInput(SeedHistory("hi"), activeRecall: null, audience: TrustAudience.Public)
-            with { State = stateWithJob };
+            with
+        { State = stateWithJob };
 
         var block = SessionMessageAssembler.BuildVolatileContextBlock(input);
         Assert.DoesNotContain("[active-background-jobs]", block);
@@ -440,9 +446,11 @@ public sealed class SessionMessageAssemblerTests
                 Audience = TrustAudience.Personal,
                 Boundary = TrustBoundary.Personal,
                 OutputLogPath = "/home/op/.netclaw/jobs/job01/output.log"
-            }) with { History = SeedHistory("hi") };
+            }) with
+        { History = SeedHistory("hi") };
         var input = MakeInput(SeedHistory("hi"), activeRecall: null, audience: TrustAudience.Personal)
-            with { State = stateWithJob };
+            with
+        { State = stateWithJob };
 
         var block = SessionMessageAssembler.BuildVolatileContextBlock(input);
         Assert.Contains("[active-background-jobs]", block);

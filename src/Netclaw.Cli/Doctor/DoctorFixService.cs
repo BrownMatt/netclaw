@@ -1,4 +1,4 @@
-﻿// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
 // <copyright file="DoctorFixService.cs" company="Petabridge, LLC">
 //      Copyright (C) 2026 - 2026 Petabridge, LLC <https://petabridge.com>
 // </copyright>
@@ -67,15 +67,6 @@ public sealed class DoctorFixService
 
         if (obj["Models"] is JsonObject modelsNode)
         {
-            var legacyEnvironmentOverride = ModelEntryWriter.FindLegacyEnvironmentOverride();
-            if (legacyEnvironmentOverride is not null)
-            {
-                throw new InvalidOperationException(
-                    $"Cannot migrate Models while legacy environment override '{legacyEnvironmentOverride}' is set. " +
-                    "Move model overrides to NETCLAW_Models__Definitions__<name>__* and " +
-                    "NETCLAW_Models__Roles__* first.");
-            }
-
             var models = JsonSerializer.Deserialize<Dictionary<string, object>>(modelsNode.ToJsonString())!;
             if (ModelEntryWriter.MigrateLegacy(models))
             {

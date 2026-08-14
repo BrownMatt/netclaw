@@ -88,6 +88,7 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
     private readonly ModelInputMediaBuffer _mediaBuffer = new();
     private MessageSource? _currentTurnSource;
     private TurnContext? _currentTurnContext;
+    private readonly SessionScratchCorrectionState _sessionScratchCorrections = new();
     private bool _processingStateActive;
     private ApprovalTurnState _approvalTurnState = ApprovalTurnState.None;
     private readonly ToolRegistry? _fullRegistry;
@@ -570,6 +571,26 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
 
             const string errorMessage = "I encountered an error executing a tool. Please try again.";
             var category = msg.Cause is TimeoutException ? ErrorCategory.Timeout : ErrorCategory.ToolFailure;
+
+            // A partial parallel-batch failure leaves the tail assistant tool_calls
+            // message with unanswered call(s) — the sibling(s) that faulted. Close
+            // those out with synthetic tool-results BEFORE FailCurrentTurn appends the
+            // "I encountered an error" assistant reply. Otherwise that reply wedges
+            // between the tool_calls message and the rest of its results, which strict
+            // OpenAI-compatible providers (DeepSeek/Qwen/vLLM) reject on every later
+            // turn with 400 "insufficient tool messages following tool_calls".
+            if (ParkedToolBatchHistory.FindRedrivableAssistantMessage(_state.History, null) is not null)
+            {
+                var abandoned = BuildToolBatchAbandonedEvent(
+                    "Tool call was not completed — the tool run failed.");
+                Persist(abandoned, evt =>
+                {
+                    ApplyToolBatchAbandoned(evt);
+                    FailCurrentTurn(errorMessage, msg.Cause, category);
+                });
+                return;
+            }
+
             FailCurrentTurn(errorMessage, msg.Cause, category);
         });
 
@@ -906,6 +927,9 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
                 Result = result.Content ?? string.Empty
             }, OutputFilter.ToolCalls);
         }
+
+        foreach (var change in msg.ScratchCorrectionChanges)
+            _sessionScratchCorrections.Apply(change);
 
         // Processes all results, including failed tool calls. RecentFiles tracks
         // interaction intent, not successful reads only.
@@ -1944,16 +1968,17 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
     /// same dispatch logic — there is no divergent second copy.
     /// </summary>
     /// <param name="oneTimeApprovalPreSeed">
-    /// Optional map of <c>callId → approved patterns</c>. For each entry, the
-    /// pipeline pre-seeds the one-time approval bypass on that call's execution
-    /// context before the first attempt, so an <c>ApprovedOnce</c> re-drive
-    /// skips the approval gate for exactly that call without emitting a second
-    /// approval prompt. Scoped per call id — never widens scope to other calls.
+    /// Optional map of <c>callId → one-time authorization keys</c>. Each value
+    /// binds the approved patterns and exact approval-candidate snapshot. The
+    /// pipeline pre-seeds the bypass before the first attempt, so an
+    /// <c>ApprovedOnce</c> re-drive cannot emit a duplicate prompt or authorize
+    /// a newly unsafe candidate. The keys apply only to that call id.
     /// </param>
     private void DispatchToolBatch(
         List<FunctionCallContent> toolCalls,
         IReadOnlyDictionary<string, IReadOnlyList<string>>? oneTimeApprovalPreSeed = null,
-        IReadOnlyDictionary<string, ApprovalDecision>? decisionOverride = null)
+        IReadOnlyDictionary<string, ApprovalDecision>? decisionOverride = null,
+        IReadOnlyDictionary<string, string>? sessionScratchDenialDirectories = null)
     {
         _activeToolBatch.Start(toolCalls);
 
@@ -2002,7 +2027,8 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
         // pipeline's deny-path hint logic can run without a policy lookup.
         // The hint is suppressed for audiences that cannot call the tool
         // (Public, audience profiles that explicitly drop it).
-        var setWorkingDirectoryAvailable = IsSetWorkingDirectoryAvailable();
+        var setWorkingDirectoryTool = GetExposedSetWorkingDirectoryTool();
+        var setWorkingDirectoryAvailable = setWorkingDirectoryTool is not null;
 
         CancelAndDisposeToolExecutionCts();
         _activeToolExecutionCts = new CancellationTokenSource();
@@ -2032,11 +2058,17 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
                 new ToolExecutionTimeout(Timeout.InfiniteTimeSpan)),
             BackgroundJobs = backgroundJobs,
             SetWorkingDirectoryAvailable = setWorkingDirectoryAvailable,
+            CanDeclareWorkingDirectory = setWorkingDirectoryTool is null
+                ? null
+                : setWorkingDirectoryTool.CanDeclare,
             StreamResults = true,
             OneTimeApprovalPreSeed = oneTimeApprovalPreSeed
                 ?? new Dictionary<string, IReadOnlyList<string>>(),
             DecisionOverrides = decisionOverride
                 ?? new Dictionary<string, ApprovalDecision>(),
+            SessionScratchDenialDirectories = sessionScratchDenialDirectories
+                ?? new Dictionary<string, string>(),
+            ScratchCorrections = _sessionScratchCorrections.Snapshot(),
             CancellationToken = toolExecutionCt
         };
 
@@ -2227,6 +2259,9 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
             return;
         }
 
+        if (TryRejectIncompatibleInput(cmd.MediaReferences, cmd.Source))
+            return;
+
         _inFlightDedup.ReserveReminder(reminderId);
         _inFlightDedup.ReserveBackgroundJob(bgJobId);
 
@@ -2278,6 +2313,7 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
 
     private void ContinueIncomingUserMessage(SendUserMessage cmd)
     {
+        _sessionScratchCorrections.Clear();
         _deliveryRetry.Clear();
         _currentTurnSource = cmd.Source;
         BindTurnTelemetry(cmd.Source);
@@ -2317,33 +2353,6 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
             _config.Tuning.DiscoveredToolRetentionTurns,
             _config.Tuning.DiscoveredToolMaxCount,
             _fullRegistry);
-
-        // Strict modality consumer contract: the session actor trusts ingress
-        // to have routed attachments through its own capability gate. If an
-        // unsupported modality still reaches here, the originating channel
-        // skipped the contract in netclaw-input-adapters and that's a bug
-        // the operator needs to see — surface it loudly and continue.
-        if (mediaRefs.Count > 0 && !_model.InputModalities.HasFlag(Configuration.ModelModality.Image))
-        {
-            var offendingRefs = mediaRefs.Where(r => r.Modality == (int)MediaModality.Image).ToList();
-            if (offendingRefs.Count > 0)
-            {
-                var offendingDesc = string.Join(",",
-                    offendingRefs.Select(r => $"{r.RelativePath}:modality={r.Modality}"));
-                _log.Error(
-                    "ingress_bug model={ModelId} modalities={Modalities} offending={Offending}",
-                    _model.ModelId, _model.InputModalities, offendingDesc);
-
-                mediaRefs = [.. mediaRefs.Where(r => r.Modality != (int)MediaModality.Image)];
-
-                const string ingressBugNotice =
-                    "[system] An attachment was received but could not be delivered to the model due to an ingress bug. " +
-                    "Please retry, or notify the operator if this persists.";
-                userContent = string.IsNullOrEmpty(userContent)
-                    ? ingressBugNotice
-                    : userContent + "\n\n" + ingressBugNotice;
-            }
-        }
 
         if (TryHandleSlashCommand(executableUserContent, mediaRefs))
             return;
@@ -2667,6 +2676,21 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
 
     private void FireLlmCall(string? recallQuery = null, bool forceNoTools = false)
     {
+        var compatibility = ModelInputCompatibility.Evaluate(_model.InputModalities, _state.History);
+        if (!compatibility.IsCompatible)
+        {
+            TurnLog().Warning(
+                "turn_media_history_incompatible required={Required} unsupported={Unsupported} unknownCount={UnknownCount} " +
+                "model={ModelId} — incompatible media references will be stripped from wire messages by the assembler",
+                compatibility.RequiredModalities,
+                compatibility.UnsupportedModalities,
+                compatibility.UnknownModalityValues.Count,
+                _model.ModelId);
+            // Do not fail the turn — ChatMessageConverter.ToAiMessages strips
+            // incompatible DataContent at assembly time, and the assembler
+            // injects a volatile system notice. The session stays usable.
+        }
+
         _anyContentStreamed = false;
         CancelAndDisposeLlmCts();
         _activeLlmCts = new CancellationTokenSource();
@@ -2745,6 +2769,65 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
         ContinueFireLlmCall(forceNoTools);
     }
 
+    private bool TryRejectIncompatibleInput(
+        IReadOnlyList<SerializableMediaReference> pendingMedia,
+        MessageSource? source)
+    {
+        var compatibility = ModelInputCompatibility.Evaluate(
+            _model.InputModalities,
+            _state.History,
+            pendingMedia);
+        if (compatibility.IsCompatible)
+            return false;
+
+        // History-only incompatibility: debug log and let the assembler strip
+        // incompatible media at wire time. Only new user-supplied media on this
+        // specific command triggers a hard rejection.
+        if (pendingMedia.Count == 0)
+        {
+            TurnLog().Info(
+                "session_history_media_stripped model={ModelId} required={Required} unsupported={Unsupported} unknown={Unknown} " +
+                "— historical media references are incompatible with the current model and will be stripped by the assembler",
+                _model.ModelId,
+                compatibility.RequiredModalities,
+                compatibility.UnsupportedModalities,
+                string.Join(",", compatibility.UnknownModalityValues));
+            return false;
+        }
+
+        var message = ModelInputCompatibility.BuildErrorMessage(_model, compatibility);
+        var cause = new InvalidOperationException(message);
+        var correlationId = Guid.NewGuid();
+
+        _log.Error(
+            cause,
+            "session_input_incompatible model={ModelId} supported={Supported} required={Required} unsupported={Unsupported} unknown={Unknown} correlationId={CorrelationId}",
+            _model.ModelId,
+            _model.InputModalities,
+            compatibility.RequiredModalities,
+            compatibility.UnsupportedModalities,
+            string.Join(",", compatibility.UnknownModalityValues),
+            correlationId);
+
+        EmitOutput(new ErrorOutput
+        {
+            SessionId = _sessionId,
+            Message = message,
+            Category = ErrorCategory.InputCompatibility,
+            CorrelationId = correlationId,
+            Cause = cause
+        });
+        EmitOutput(new TurnCompleted
+        {
+            SessionId = _sessionId,
+            TurnNumber = new TurnNumber(_state.TurnCount),
+            Outcome = TurnOutcome.Skipped,
+            SourceReminderId = source?.ReminderId
+        });
+        TryReplyAck();
+        return true;
+    }
+
     private void ContinueFireLlmCall(bool forceNoTools)
     {
         _activeRecall = _recallManager.TurnRecallCache;
@@ -2776,7 +2859,8 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
             SkillHint: skillHint,
             // Canonical names live in history (post-PR follow-up); the
             // LLM provider wants the sanitized alias back on the wire.
-            ToolNameToLlmFacing: _toolRegistry is null ? null : _toolRegistry.ToLlmFacingName));
+            ToolNameToLlmFacing: _toolRegistry is null ? null : _toolRegistry.ToLlmFacingName,
+            SupportedInputModalities: _model.InputModalities));
         _startupContextInjected = true;
 
         var self = Self;
@@ -2929,14 +3013,16 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
     /// at the tool, so emitting it on a Public-audience turn that cannot call
     /// the tool would be misleading.
     /// </summary>
-    private bool IsSetWorkingDirectoryAvailable()
+    private SetWorkingDirectoryTool? GetExposedSetWorkingDirectoryTool()
     {
         if (_toolAccessPolicy is null || _fullRegistry is null)
-            return false;
+            return null;
 
         var registration = _fullRegistry.GetRegistrationByToolName(SetWorkingDirectoryTool.ToolName);
-        return registration is not null
-               && _toolAccessPolicy.IsToolExposed(registration, _currentTrustContext);
+        return registration?.Tool is SetWorkingDirectoryTool tool
+               && _toolAccessPolicy.IsToolExposed(registration, _currentTrustContext)
+            ? tool
+            : null;
     }
 
 
@@ -3001,7 +3087,12 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
             errorMsg += hint is not null ? $"  {cmd} {hint}\n" : $"  {cmd}\n";
         }
 
-        EmitOutput(new TextOutput(errorMsg.TrimEnd()) { SessionId = _sessionId }, OutputFilter.Text);
+        return RejectSlashCommand(errorMsg.TrimEnd());
+    }
+
+    private bool RejectSlashCommand(string message)
+    {
+        EmitOutput(new TextOutput(message) { SessionId = _sessionId }, OutputFilter.Text);
         EmitOutput(new TurnCompleted
         {
             SessionId = _sessionId,
@@ -3015,10 +3106,13 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
 
     private bool HandleInlineSlashCommand(SkillEntry skill, string remainder, IReadOnlyList<SerializableMediaReference> mediaRefs)
     {
+        if (skill.Source is not FileSkillSource fileSource)
+            return RejectSlashCommand($"Skill /{skill.Name} cannot use file-based slash dispatch.");
+
         string skillBody;
         try
         {
-            var content = File.ReadAllText(skill.FilePath);
+            var content = File.ReadAllText(fileSource.FilePath);
             skillBody = Skills.SkillScanner.ExtractBody(content);
         }
         catch (IOException ex)
@@ -3060,6 +3154,9 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
 
     private bool TryHandleRoutedSlashCommand(SkillEntry skill, string remainder, IReadOnlyList<SerializableMediaReference> mediaRefs, string routedSubagent)
     {
+        if (skill.Source is not FileSkillSource fileSource)
+            return RejectSlashCommand($"Skill /{skill.Name} cannot use file-based routed dispatch.");
+
         if (_subAgentRegistry is null || _subAgentSpawner is null)
         {
             EmitOutput(new TextOutput($"Skill '/{skill.Name}' routes to subagent '{routedSubagent}', but subagent routing is not available in this runtime.")
@@ -3117,7 +3214,7 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
         string skillBody;
         try
         {
-            var content = File.ReadAllText(skill.FilePath);
+            var content = File.ReadAllText(fileSource.FilePath);
             skillBody = Skills.SkillScanner.ExtractBody(content);
         }
         catch (IOException ex)
@@ -3463,6 +3560,7 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
             OptionKeys = msg.Options.Select(o => o.Key.Value).ToArray(),
             Candidates = msg.Candidates,
             TurnContext = _currentTurnContext?.ToRecord(),
+            SessionScratchDirectory = dispatch.SessionScratchDirectory,
             RequestedAtMs = NowMs()
         };
 
@@ -3508,7 +3606,8 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
             turnContext,
             restoreFailure,
             evt.OptionKeys,
-            evt.Candidates);
+            evt.Candidates,
+            evt.SessionScratchDirectory);
         _resolvedToolApprovals.Remove(evt.CallId);
 
         if (persistApprovalState && turnContext is not null)
@@ -3548,6 +3647,7 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
 
     private void ClearApprovalTurnState()
     {
+        _sessionScratchCorrections.Clear();
         _approvalTurnState = ApprovalTurnState.None;
         _currentTurnContext = null;
     }
@@ -3901,7 +4001,9 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
             ];
 
         var options = optionKeys
-            .Select(key => new ToolInteractionOption(new ApprovalOptionKey(key), ApprovalOptionKeys.LabelFor(key)))
+            .Select(key => new ToolInteractionOption(
+                new ApprovalOptionKey(key),
+                ApprovalOptionKeys.LabelFor(key, new ToolName(pending.ToolName).IsMcp)))
             .ToArray();
 
         if (!ToolInteractionResponseParser.TryParseApprovalResponse(msg.Text, options, out var selectedKey)
@@ -4237,16 +4339,26 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
         // we abandon the parked batch instead of replaying side effects.
         var preSeed = new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal);
         var decisionOverride = new Dictionary<string, ApprovalDecision>(StringComparer.Ordinal);
+        var sessionScratchDenialDirectories = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var call in assistantMessage.ToolCalls)
         {
             if (!_resolvedToolApprovals.TryGetValue(call.CallId.Value, out var resolved))
                 continue;
 
-            if (resolved.Decision == ApprovalDecision.ApprovedOnce)
+            if (resolved.Decision.IsApprovalGrant())
             {
-                // ApprovedOnce has no persisted grant. Pre-seed only this call
-                // so the re-drive skips the gate once without broadening approval.
-                preSeed[call.CallId.Value] = resolved.Pending.Patterns;
+                // Pre-seed the one-time bypass for the just-approved call so the
+                // re-drive runs it once even when its durable grant (if any) does
+                // not cover every candidate verb — e.g. a piped command's standalone
+                // verbs (base64, head) are never persisted directory-scoped.
+                // ApprovedOnce has no durable grant at all; broader scopes still
+                // record their durable grant separately. This only authorizes the
+                // immediate re-drive, matching the live pipeline and the sub-agent.
+                // See https://github.com/netclaw-dev/netclaw/issues/1802.
+                preSeed[call.CallId.Value] = OneTimeApprovalKeys.Create(
+                    resolved.Pending.Patterns,
+                    resolved.Pending.Candidates,
+                    resolved.Pending.Cwd);
             }
 
             if (resolved.Decision is ApprovalDecision.Denied or ApprovalDecision.TimedOut)
@@ -4255,12 +4367,18 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
                 // history stays well-formed, but the reconstructed dispatch
                 // must not execute the tool or ask for approval again.
                 decisionOverride[call.CallId.Value] = resolved.Decision;
+                if (resolved.Decision == ApprovalDecision.Denied
+                    && resolved.Pending.SessionScratchDirectory is { Length: > 0 } scratchDirectory)
+                {
+                    sessionScratchDenialDirectories[call.CallId.Value] = scratchDirectory;
+                }
             }
         }
 
         return new ApprovalRedrivePlan(
             preSeed.Count == 0 ? null : preSeed,
-            decisionOverride.Count == 0 ? null : decisionOverride);
+            decisionOverride.Count == 0 ? null : decisionOverride,
+            sessionScratchDenialDirectories.Count == 0 ? null : sessionScratchDenialDirectories);
     }
 
     /// <summary>
@@ -4330,7 +4448,8 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
         DispatchToolBatch(
             toolCalls,
             oneTimeApprovalPreSeed: redrivePlan.OneTimeApprovalPreSeed,
-            decisionOverride: redrivePlan.DecisionOverride);
+            decisionOverride: redrivePlan.DecisionOverride,
+            sessionScratchDenialDirectories: redrivePlan.SessionScratchDenialDirectories);
         return true;
     }
 
@@ -4459,13 +4578,33 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
         // through here just feeds the filter that drops standalone verbs
         // with no path arg (curl, gh, git status).
         var sessionDirectory = GetSessionDirectory();
+        var grantContext = ApprovalGrantContext.FromDecision(
+            decision,
+            pending.Cwd,
+            sessionDirectory);
+
+        if (_approvalService is IStructuredToolApprovalService structuredApprovalService)
+        {
+            var grants = ApprovalBucketBuilder.BuildGrants(
+                pending.Candidates,
+                grantContext);
+            if (grants.Count > 0)
+            {
+                await structuredApprovalService.RecordApprovalCandidatesAsync(
+                    (ToolApprovalSessionId)_sessionId.Value,
+                    audience,
+                    new ToolName(pending.ToolName),
+                    grants,
+                    persistent,
+                    ct);
+            }
+
+            return;
+        }
 
         var grouping = ApprovalBucketBuilder.Build(
             pending.Candidates,
-            persistent,
-            globalWildcard,
-            pending.Cwd,
-            sessionDirectory);
+            grantContext);
 
         foreach (var (key, verbs) in grouping)
         {
@@ -4506,6 +4645,7 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
 
     private void ProcessToolCallResult(Pipelines.ToolCallResult result)
     {
+        _sessionScratchCorrections.Apply(result.ScratchCorrectionChange);
         TrackStartedBackgroundJob(result.StartedBackgroundJob);
 
         var emittedRunIds = new HashSet<SubAgentRunId>();

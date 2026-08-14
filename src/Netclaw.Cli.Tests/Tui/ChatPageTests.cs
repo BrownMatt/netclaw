@@ -4,10 +4,14 @@
 // </copyright>
 // -----------------------------------------------------------------------
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.AI;
 using Netclaw.Actors.Protocol;
+using Netclaw.Actors.Tools;
 using Netclaw.Cli.Daemon;
 using Netclaw.Cli.Tui;
 using Netclaw.Configuration;
+using Netclaw.Security;
+using Netclaw.Tools;
 using Termina;
 using Termina.Hosting;
 using Termina.Input;
@@ -171,6 +175,111 @@ public sealed class ChatPageTests
     }
 
     [Fact]
+    public async Task Escape_WithPendingInteraction_DeniesInsteadOfQuitting()
+    {
+        // Regression for #1757: pressing Escape during an approval prompt used
+        // to call RequestAppShutdown() and tear down the whole session. It must
+        // now act as a deny on the pending interaction — the session stays
+        // alive and the deny key is what gets submitted to the daemon.
+        // The ordered event list proves the sequence: Escape submits deny,
+        // and only the explicit Ctrl+Q afterwards shuts the app down.
+        var (terminal, app, vm) = CreateHeadlessApp(BuildApproval(LongShellBody), out var input);
+
+        input.EnqueueKey(ConsoleKey.Escape); // deny the approval
+        input.EnqueueKey(ConsoleKey.Q, false, false, true); // then quit cleanly
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await app.RunAsync(cts.Token);
+
+        Assert.Equal(new[] { "deny:called", "submit:deny", "shutdown" }, vm.LifecycleEvents);
+    }
+
+    [Fact]
+    public async Task Escape_WithPendingInteractionAndStaleGenerating_Denies()
+    {
+        // The reorder fix: a pending approval prompt must win over the
+        // generation-cancel branch even when IsGenerating still reads true
+        // (stale flag race — the daemon output handler clears it on arrival,
+        // but the UI thread can observe the pre-clear value). Pre-fix, Escape
+        // took the IsGenerating arm, swallowed the key, and only quit after a
+        // second Escape; the prompt was never denied.
+        var (terminal, app, vm) = CreateHeadlessApp(
+            BuildApproval(LongShellBody), out var input, startGenerating: true);
+
+        input.EnqueueKey(ConsoleKey.Escape); // deny the approval
+        input.EnqueueKey(ConsoleKey.Q, false, false, true); // then quit cleanly
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await app.RunAsync(cts.Token);
+
+        Assert.Equal(new[] { "deny:called", "submit:deny", "shutdown" }, vm.LifecycleEvents);
+    }
+
+    [Fact]
+    public async Task Escape_WhileGenerating_ShowsStatusInsteadOfQuitting()
+    {
+        // Escape during generation can't cancel the turn yet (separate TODO),
+        // but it must NOT quit the app silently and must NOT eat the key
+        // without feedback — the user gets a status message instead.
+        var (terminal, app, vm) = CreateHeadlessApp(seed: null, out var input, startGenerating: true);
+
+        input.EnqueueKey(ConsoleKey.Escape); // no-op + status message
+        input.EnqueueKey(ConsoleKey.Q, false, false, true); // quit cleanly
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await app.RunAsync(cts.Token);
+
+        Assert.Equal(new[] { "shutdown" }, vm.LifecycleEvents);
+        Assert.Contains("cancel", vm.StatusMessage.Value, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Escape_WithNoPendingInteraction_IsNoOp_CtrlQQuits()
+    {
+        // Escape is a pure cancel key everywhere — idle it's a no-op, never
+        // a quit. Ctrl+Q is the only quit affordance (#1757). Enqueue Escape
+        // first, then Ctrl+Q; the lifecycle log proves Escape didn't shut
+        // down and only the explicit Ctrl+Q did.
+        var (terminal, app, vm) = CreateHeadlessApp(seed: null, out var input);
+
+        input.EnqueueKey(ConsoleKey.Escape); // idle: no-op
+        input.EnqueueKey(ConsoleKey.Q, false, false, true); // quit
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await app.RunAsync(cts.Token);
+
+        Assert.Equal(new[] { "shutdown" }, vm.LifecycleEvents);
+    }
+
+    [Fact]
+    public async Task DenyPendingInteraction_NoDenyOption_DoesNotSubmit()
+    {
+        // If an approval interaction somehow lacks a deny option, denying must
+        // be a no-op rather than submitting an unrelated option — and Escape
+        // must still not quit the session.
+        var noDenyOptions = new[]
+        {
+            new ToolInteractionOption(ApprovalOptionKeys.ApproveOnceKey, ApprovalOptionKeys.ApproveOnceLabel),
+            new ToolInteractionOption(ApprovalOptionKeys.ApproveSessionKey, ApprovalOptionKeys.ApproveSessionLabel)
+        };
+        var (terminal, app, vm) = CreateHeadlessApp(
+            BuildApproval(LongShellBody), out var input, options: noDenyOptions);
+
+        input.EnqueueKey(ConsoleKey.Escape); // attempt deny
+        input.EnqueueKey(ConsoleKey.Q, false, false, true); // then quit cleanly
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await app.RunAsync(cts.Token);
+
+        Assert.Null(vm.LastSubmittedInteractionKey);
+        // The "deny:called" marker proves Escape routed to the deny path even
+        // though the interaction carried no deny option — the no-op branch
+        // ran, and nothing bogus was submitted. Without the marker this test
+        // would pass vacuously even if the page never called deny at all.
+        Assert.Equal(new[] { "deny:called", "shutdown" }, vm.LifecycleEvents);
+    }
+
+    [Fact]
     public void NewInteraction_ResetsCollapsedState()
     {
         // This case operates directly on the ViewModel — the goal is to
@@ -325,9 +434,91 @@ public sealed class ChatPageTests
         WriteSnapshot("chat-approval-expanded.txt", expanded);
     }
 
-    private async Task<string> CaptureFrameAsync(bool expand)
+    [Fact]
+    public async Task LargeMcpApproval_RenderedFrameSnapshot()
     {
-        var (terminal, app, _) = CreateHeadlessApp(BuildApproval(LongShellBody), out var input);
+        var content = string.Join('\n', Enumerable.Repeat("large memorizer payload that must not render", 2_000));
+        var function = AIFunctionFactory.Create(
+            (string contents, string source_path, string destination_directory, string access_token) => "uploaded",
+            "upload",
+            "Upload a file to Dropbox");
+        var tool = new McpToolAdapter(function, "Dropbox", "upload");
+        var config = new ToolConfig { ShellMode = ShellExecutionMode.HostAllowed };
+        config.AudienceProfiles.Personal.AllowedMcpServers.Add("Dropbox");
+        config.AudienceProfiles.Personal.ApprovalPolicy = new ToolApprovalConfig
+        {
+            McpServerDefaults = new Dictionary<string, ToolApprovalMode>(StringComparer.Ordinal)
+            {
+                ["Dropbox"] = ToolApprovalMode.Approval
+            }
+        };
+        var policy = new ToolAccessPolicy(
+            config,
+            new EffectivePolicyDefaults(
+                DeploymentPosture.Personal,
+                TrustAudience.Personal,
+                ShellExecutionMode.HostAllowed,
+                UsedStrictFallback: false),
+            new ShellCommandPolicy(),
+            new ToolPathPolicy([]));
+        var executionContext = new ToolExecutionContext(
+            new ToolRunScope
+            {
+                Session = new ToolSessionScope.Bound("test-session", null),
+                Audience = TrustAudience.Personal,
+                InlineOutputBudget = InlineOutputBudget.Default,
+                InteractiveApproval = new InteractiveApprovalCapability.Unavailable()
+            },
+            ToolExecutionTimeout.Default);
+        var decision = policy.AuthorizeInvocation(
+            tool,
+            executionContext,
+            new Dictionary<string, object?>
+            {
+                ["contents"] = content,
+                ["source_path"] = "/home/operator/reports/2026/Q3/quarterly-results-final.pdf",
+                ["destination_directory"] = "/Finance/Board Pack/2026/Q3",
+                ["access_token"] = "must-never-render",
+                ["_rationale"] = "Upload the requested board report"
+            });
+        var approvalContext = Assert.IsType<ToolApprovalContext>(decision.ApprovalContext);
+        var approval = BuildApproval(approvalContext.DisplayText, approvalContext.ToolName) with
+        {
+            Patterns = approvalContext.Patterns,
+            CandidateVerbs = approvalContext.CandidateVerbs,
+            Options = approvalContext.Options
+                .Select(option => new ToolInteractionOption(option.Key, option.Label))
+                .ToArray()
+        };
+
+        var collapsed = await CaptureFrameAsync(approval, expand: false);
+        var expanded = await CaptureFrameAsync(approval, expand: true);
+
+        WriteSnapshot("chat-mcp-approval-large-collapsed.txt", collapsed);
+        WriteSnapshot("chat-mcp-approval-large-expanded.txt", expanded);
+
+        Assert.Contains("/Finance/Board Pack/2026/Q3", expanded);
+        Assert.Contains("quarterly-results-final.pdf", expanded);
+        Assert.Contains(content.Length.ToString(), expanded);
+        Assert.Contains("chars, 2000 lines", expanded);
+        Assert.Contains("MCP tool approval required", expanded);
+        Assert.Contains("Invocation:", expanded);
+        Assert.Contains(ApprovalOptionKeys.ApproveMcpToolLabel, expanded);
+        Assert.DoesNotContain("Patterns:", expanded);
+        Assert.DoesNotContain(ApprovalOptionKeys.ApproveEverywhereLabel, expanded);
+        Assert.DoesNotContain("large memorizer payload", expanded);
+        Assert.DoesNotContain("must-never-render", collapsed);
+        Assert.DoesNotContain("must-never-render", expanded);
+        Assert.DoesNotContain("_rationale", expanded);
+        Assert.DoesNotContain("Upload the requested board report", expanded);
+    }
+
+    private async Task<string> CaptureFrameAsync(bool expand)
+        => await CaptureFrameAsync(BuildApproval(LongShellBody), expand);
+
+    private async Task<string> CaptureFrameAsync(ToolInteractionRequest approval, bool expand)
+    {
+        var (terminal, app, _) = CreateHeadlessApp(approval, out var input);
         if (expand)
             input.EnqueueKey(ConsoleKey.O, false, false, true);
         input.EnqueueKey(ConsoleKey.Q, false, false, true);
@@ -363,7 +554,7 @@ public sealed class ChatPageTests
         File.WriteAllText(Path.Combine(targetDir, filename), content);
     }
 
-    private static ToolInteractionRequest BuildApproval(string displayText)
+    private static ToolInteractionRequest BuildApproval(string displayText, string toolName = "shell_execute")
     {
         return new ToolInteractionRequest
         {
@@ -371,7 +562,7 @@ public sealed class ChatPageTests
             TimestampMs = 0,
             Kind = "approval",
             CallId = new Netclaw.Tools.ToolCallId("test-call"),
-            ToolName = new Netclaw.Tools.ToolName("shell_execute"),
+            ToolName = new Netclaw.Tools.ToolName(toolName),
             DisplayText = displayText,
             Patterns = ["cd"],
             CandidateVerbs = ["cd"],
@@ -387,7 +578,8 @@ public sealed class ChatPageTests
     private static (VirtualTerminal Terminal, TerminaApplication App, TestChatViewModel Vm)
         CreateHeadlessApp(ToolInteractionRequest? seed, out VirtualInputSource input,
             int width = 120, int height = 40,
-            IReadOnlyList<ToolInteractionOption>? options = null)
+            IReadOnlyList<ToolInteractionOption>? options = null,
+            bool startGenerating = false)
     {
         var terminal = new VirtualTerminal(width, height);
         var virtualInput = new VirtualInputSource();
@@ -410,7 +602,7 @@ public sealed class ChatPageTests
                         : options is null
                             ? seed
                             : seed with { Options = options };
-                    capturedVm = new TestChatViewModel(effectiveSeed);
+                    capturedVm = new TestChatViewModel(effectiveSeed, startGenerating);
                     return capturedVm;
                 });
         });
@@ -431,8 +623,31 @@ public sealed class ChatPageTests
     private sealed class TestChatViewModel : ChatViewModel
     {
         private readonly ToolInteractionRequest? _seed;
+        private readonly bool _startGenerating;
 
-        public TestChatViewModel(ToolInteractionRequest? seed)
+        /// <summary>
+        /// Set when the page routes Escape to app shutdown (the pre-#1757
+        /// buggy path). Tests assert this stays false while an approval prompt
+        /// is pending.
+        /// </summary>
+        public bool ShutdownRequested => LifecycleEvents.Contains("shutdown");
+
+        /// <summary>
+        /// Ordered record of ViewModel lifecycle events, in the order they
+        /// happened. Lets tests prove that Escape submitted a deny BEFORE the
+        /// explicit Ctrl+Q quit — the flag alone can't distinguish which key
+        /// requested shutdown.
+        /// </summary>
+        public List<string> LifecycleEvents { get; } = new();
+
+        /// <summary>
+        /// Captures the option key submitted to the daemon. Headless tests
+        /// cannot reach a live daemon, so the submission seam records the key
+        /// the ViewModel resolved and simulates a successful response.
+        /// </summary>
+        public string? LastSubmittedInteractionKey { get; private set; }
+
+        public TestChatViewModel(ToolInteractionRequest? seed, bool startGenerating = false)
             : base(
                 // 127.0.0.1:1 is never dialed: InitializeSessionAsync is
                 // overridden to no-op, so the underlying HubConnection stays
@@ -445,6 +660,7 @@ public sealed class ChatPageTests
                 new NetclawPaths())
         {
             _seed = seed;
+            _startGenerating = startGenerating;
         }
 
         protected override Task InitializeSessionAsync() => Task.CompletedTask;
@@ -454,6 +670,30 @@ public sealed class ChatPageTests
             base.OnActivated();
             if (_seed is not null)
                 SeedPendingInteractionForTesting(_seed);
+            // Simulate the stale-flag race: IsGenerating can still read true
+            // right after an interaction lands (the daemon output handler
+            // clears it, but the UI thread can observe the pre-clear value).
+            if (_startGenerating)
+                IsGenerating.Value = true;
+        }
+
+        public override void RequestAppShutdown()
+        {
+            LifecycleEvents.Add("shutdown");
+            base.RequestAppShutdown();
+        }
+
+        internal override Task DenyPendingInteractionAsync()
+        {
+            LifecycleEvents.Add("deny:called");
+            return base.DenyPendingInteractionAsync();
+        }
+
+        protected override Task SubmitInteractionSelectionAsync(string selectedKey)
+        {
+            LastSubmittedInteractionKey = selectedKey;
+            LifecycleEvents.Add($"submit:{selectedKey}");
+            return Task.CompletedTask;
         }
     }
 }

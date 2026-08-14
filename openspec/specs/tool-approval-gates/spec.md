@@ -14,12 +14,17 @@ directory grants never widen access to protected paths.
 The system SHALL support per-audience tool approval configuration via
 `ToolApprovalConfig` on `ToolAudienceProfile`. Each audience profile SHALL
 independently specify a `DefaultMode` (Auto, Approval, Deny) and per-tool
-overrides in `ToolOverrides`. The default `DefaultMode` SHALL be `Auto` (no
-approval required). Runtime audience defaults SHALL NOT implicitly place
-`shell_execute` in `Approval` mode. Instead, the init-generated Personal config
-SHALL explicitly write
-`ApprovalPolicy.ToolOverrides.shell_execute = Approval` as the recommended
-shell-safe default.
+overrides in `ToolOverrides`. The default `DefaultMode` SHALL be `Auto` for
+tools without a stricter invocation-specific rule.
+
+The init-generated Personal config SHALL explicitly write
+`ApprovalPolicy.ToolOverrides.shell_execute = Approval` as the normal
+shell-safe configuration. For a Personal shell invocation, an exact
+`shell_execute` override SHALL select `Auto`, `Approval`, or `Deny`. The runtime
+SHALL select `Approval` when that exact override is absent. This rule SHALL
+apply when `ApprovalPolicy` is absent. It SHALL also apply when `DefaultMode`
+is `Auto`. This fallback SHALL prevent a missing field from enabling host shell
+without approval.
 
 #### Scenario: Shell requires approval in init-generated Personal config
 
@@ -30,15 +35,36 @@ shell-safe default.
 - **AND** `DispatchingToolExecutor` consults `IToolApprovalService` before execution
 - **AND** if the command pattern is not approved, an approval prompt is emitted
 
+#### Scenario: Missing Personal approval policy fails closed for shell
+
+- **GIVEN** a Personal audience session with `ShellMode` set to `HostAllowed`
+- **AND** the Personal profile has no `ApprovalPolicy`
+- **WHEN** the agent invokes `shell_execute`
+- **THEN** the runtime resolves the invocation to `Approval`
+- **AND** the missing policy does not enable automatic shell execution
+
+#### Scenario: Personal policy without an exact shell override fails closed
+
+- **GIVEN** a Personal approval policy whose `DefaultMode` is `Auto`
+- **AND** `ToolOverrides` has no exact `shell_execute` entry
+- **WHEN** the agent invokes `shell_execute`
+- **THEN** the runtime resolves the invocation to `Approval`
+
+#### Scenario: Explicit Personal shell Auto override executes without approval
+
+- **GIVEN** a Personal approval policy with an exact `shell_execute = Auto` override
+- **WHEN** the agent invokes a command that passes earlier security gates
+- **THEN** the tool executes without an approval prompt
+
 #### Scenario: Tool in Auto mode executes without approval
 
-- **GIVEN** a tool whose approval mode is `Auto` for the session's audience
+- **GIVEN** a tool whose effective approval mode is `Auto` for the session's audience
 - **WHEN** the agent invokes the tool
 - **THEN** the tool executes immediately without an approval prompt
 
 #### Scenario: Tool in Deny mode is always blocked
 
-- **GIVEN** a tool whose approval mode is `Deny` for the session's audience
+- **GIVEN** a tool whose effective approval mode is `Deny` for the session's audience
 - **WHEN** the agent invokes the tool
 - **THEN** the tool is denied with reason `tool_denied_by_approval_policy`
 - **AND** no approval prompt is offered
@@ -137,6 +163,25 @@ redirect targets: a quoted redirect target carrying an embedded line
 break (e.g. `>> "$LOGDIR⏎file"`) terminates the redirect walk so the
 break never reaches the stored pattern.
 
+A single-line quoted argument whose decoded text holds internal
+whitespace SHALL also terminate pattern extraction, excluding the
+argument and everything after it (issue #1406). A multi-word quoted
+operand — a commit message, a ticket body, a search string — is
+call-specific content that varies between invocations of the same verb
+chain, so it produces overly-specific approval entries that do not
+generalize: every `git commit -m "new message"` would mint a new
+pattern and re-prompt. A single-word quoted argument holds no internal
+whitespace and SHALL NOT terminate extraction, so a quoted and an
+unquoted single token (`git commit -m "fix"` and `git commit -m fix`)
+normalize to the same pattern. A path-shaped argument (`IsPath = true`)
+SHALL be exempt, so a quoted path that holds whitespace still reaches
+directory scoping. A preceding flag (e.g. `--message`) SHALL be retained
+because it carries invocation intent. This rule normalizes the stored
+and display pattern only; it SHALL NOT change the live authorization
+decision, the persisted `(verb, directory)` grant, or the verbatim
+command shown at the prompt. The rule SHALL apply identically on the
+gate (candidate) path and the persisted/display pattern path.
+
 For shell approval units, `&&`, `||`, and `;` SHALL split into separate
 units, while `|` SHALL remain inside the current unit. For `bash -c` or
 `sh -c` wrappers, the inner command SHALL be extracted and scanned
@@ -216,6 +261,40 @@ chain. Compound commands SHALL produce N entries from one user click on
   because multi-line arguments are call-specific content
 - **AND** the flag `--message` is retained because flags carry
   invocation intent
+
+#### Scenario: Single-line quoted free-text argument terminates the pattern
+
+- **GIVEN** the command `git commit -m "fix the bug"`
+- **WHEN** the pattern is extracted
+- **THEN** the pattern is `git commit -m`
+- **AND** the multi-word quoted body and everything after it are excluded
+  because a quoted argument with internal whitespace is call-specific
+  content (issue #1406)
+- **AND** the flag `-m` is retained because flags carry invocation intent
+
+#### Scenario: Multi-word quoted operands generalize across values
+
+- **GIVEN** commands `git commit -m "first message"` and
+  `git commit -m "second message"`
+- **WHEN** patterns are extracted for both
+- **THEN** both produce the same pattern `git commit -m`
+- **AND** one `git commit -m` grant covers every commit message
+
+#### Scenario: Single-word quoted argument is not dropped
+
+- **GIVEN** the commands `git commit -m fix` and `git commit -m "fix"`
+- **WHEN** patterns are extracted for both
+- **THEN** both produce the same pattern `git commit -m fix`
+- **AND** the single-word quoted token is retained because it holds no
+  internal whitespace
+
+#### Scenario: Quoted path with whitespace keeps directory scoping
+
+- **GIVEN** the command `cat "my file.txt"`
+- **WHEN** the candidate is extracted
+- **THEN** the quoted path is exempt from the free-text rule because it
+  is path-shaped (`IsPath = true`)
+- **AND** the directory of `my file.txt` still reaches directory scoping
 
 #### Scenario: Digit-bearing ref folded into the chain is trimmed
 
@@ -1262,3 +1341,90 @@ Tool approval evaluation SHALL receive the same required admitted `TurnContext` 
 - **WHEN** a child tool requires approval
 - **THEN** approval evaluation uses the explicitly inherited turn authority
 - **AND** no audience or source fallback is inferred
+
+### Requirement: Shell policy uses the canonical grammar and dialect
+
+The shell policy SHALL analyze every submitted command with the canonical shell
+grammar before process start. Shell hard deny, protected paths, safe verbs,
+stored approvals, prompt candidates, and display SHALL use that analysis.
+PowerShell analysis SHALL pass the selected
+`PwshDialect` and `PwshInitialStateMode.Unknown`. Every policy consumer SHALL
+evaluate the same complete command-occurrence set.
+
+An unparseable result, an incomplete occurrence, a dynamic verb, or an unknown
+policy-sensitive fact SHALL NOT produce a persistent candidate or safe-verb
+auto-pass. A legacy token scan MAY block a known hard deny, but it SHALL NOT
+authorize unresolved text.
+
+#### Scenario: PowerShell pipeline evaluates every stage
+
+- **GIVEN** the native Windows host uses PowerShell
+- **AND** a pipeline contains a safe stage and an unapproved stage
+- **WHEN** approval policy evaluates the command
+- **THEN** it evaluates both command occurrences
+- **AND** the safe stage does not authorize the unapproved stage
+
+#### Scenario: Windows PowerShell 5.1 rejects pipeline chains
+
+- **GIVEN** the selected dialect is `WindowsPowerShell51`
+- **AND** the command uses `&&` or `||`
+- **WHEN** approval policy analyzes the command
+- **THEN** the result cannot create persistent approval candidates
+- **AND** safe-verb policy does not allow it automatically
+
+#### Scenario: Bash PowerShell wrapper is not cross-parsed
+
+- **GIVEN** the canonical grammar is Bash
+- **AND** the command is `pwsh -NoProfile -Command 'Get-Content ./a.txt'`
+- **WHEN** approval policy analyzes the command
+- **THEN** it does not add a `Get-Content` child candidate
+- **AND** it evaluates the authored Bash external-command occurrence
+
+#### Scenario: Dynamic PowerShell command remains strict
+
+- **GIVEN** the canonical grammar is PowerShell
+- **AND** command identity or an executable region depends on an unknown value
+- **WHEN** approval policy evaluates the command
+- **THEN** no stored grant or safe verb covers the unknown occurrence
+- **AND** the caller follows the existing deny-or-approval path
+
+#### Scenario: Known PowerShell command-owned region reuses independent grants
+
+- **GIVEN** the parser emits a complete PowerShell host occurrence
+- **AND** its command-argument execution region has known phase, timing, and
+  cardinality facts
+- **AND** the region body contains at least one command occurrence
+- **AND** every command occurrence in the region body is complete
+- **WHEN** approval policy evaluates matching grants for the host and every body
+  command
+- **THEN** the opaque script-block host argument does not independently mark the
+  invocation unresolved
+- **AND** approval policy still evaluates the host and every body occurrence
+  independently
+- **AND** omitting either the host grant or a body-command grant requires
+  approval for the uncovered command
+
+#### Scenario: Incomplete PowerShell command-owned region remains strict
+
+- **GIVEN** a PowerShell command-argument execution region has an unknown
+  receiver, phase, timing, cardinality, an empty body, or an incomplete body
+  occurrence
+- **WHEN** approval policy evaluates the command
+- **THEN** the opaque host argument remains unresolved
+- **AND** stored grants do not authorize the incomplete region
+
+#### Scenario: PowerShell native hard deny precedes approval
+
+- **GIVEN** a PowerShell command stops a process, removes a root recursively,
+  or invokes `Start-Process -Verb RunAs`
+- **WHEN** shell policy evaluates the command
+- **THEN** a matching hard-deny rule blocks the complete invocation
+- **AND** no stored approval or safe verb can bypass the denial
+
+#### Scenario: Dialect change reparses before grant matching
+
+- **GIVEN** a daemon restart changes the selected PowerShell dialect
+- **AND** an existing stored approval remains present
+- **WHEN** a new command requests authorization
+- **THEN** Netclaw derives candidates with the new dialect first
+- **AND** only candidates that match the stored intent can reuse that approval

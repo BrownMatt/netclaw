@@ -1,4 +1,4 @@
-﻿// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
 // <copyright file="InitWizardPageTests.cs" company="Petabridge, LLC">
 //      Copyright (C) 2026 - 2026 Petabridge, LLC <https://petabridge.com>
 // </copyright>
@@ -104,11 +104,32 @@ public sealed class InitWizardPageTests : IDisposable
     }
 
     [Fact]
+    public async Task Escape_AtRoot_DoesNotQuit()
+    {
+        // Regression for #1764: Escape at the wizard root used to RequestQuit()
+        // (GoBack() returns false on step 0). It must be a no-op; only Ctrl+Q
+        // quits. Proof: the wizard stays alive and Enter still commits the
+        // highlighted provider.
+        var (_, app, vm) = CreateHeadlessApp(out var input);
+
+        input.EnqueueKey(ConsoleKey.Escape);            // must be a no-op
+        input.EnqueueKey(ConsoleKey.DownArrow);         // move off row 0
+        input.EnqueueKey(ConsoleKey.Enter);             // commit second provider
+        input.EnqueueKey(ConsoleKey.Q, false, false, true);
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await app.RunAsync(cts.Token);
+
+        Assert.Equal(_registry.KnownTypeKeys[1], vm.ProviderStep.SelectedProviderType);
+    }
+
+    [Fact]
     public async Task GitHubCopilotEnterpriseInputs_AcceptTypedHostAndApiBase()
     {
         var (_, app, vm) = CreateHeadlessApp(out var input);
 
-        input.EnqueueKey(ConsoleKey.DownArrow); // GitHub Copilot
+        foreach (var _ in _registry.KnownTypeKeys.TakeWhile(type => type != "github-copilot"))
+            input.EnqueueKey(ConsoleKey.DownArrow);
         input.EnqueueKey(ConsoleKey.Enter);     // provider selection
         input.EnqueueKey(ConsoleKey.Enter);     // OAuth Device Flow
         input.EnqueueKey(ConsoleKey.DownArrow); // GitHub Enterprise

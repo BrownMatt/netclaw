@@ -1,4 +1,4 @@
-﻿// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
 // <copyright file="ChatViewModel.cs" company="Petabridge, LLC">
 //      Copyright (C) 2026 - 2026 Petabridge, LLC <https://petabridge.com>
 // </copyright>
@@ -38,6 +38,15 @@ public partial class ChatViewModel : ReactiveViewModel
     private readonly Subject<SessionOutput> _outputSubject = new();
     private readonly Queue<string> _pendingMessages = new();
     private readonly Queue<ToolInteractionRequest> _pendingInteractions = new();
+
+    /// <summary>
+    /// True while an interaction response is in flight to the daemon. Guards
+    /// against duplicate submissions (e.g. Escape + Enter pressed back to
+    /// back) so only one <see cref="ToolInteractionResponse"/> is sent per
+    /// interaction. Released on success (interaction dequeued) and on failure
+    /// (prompt re-presented for retry) alike.
+    /// </summary>
+    private bool _isSubmittingInteraction;
     private IDisposable? _daemonOutputSubscription;
     private IDisposable? _daemonConnectionSubscription;
     // Per-session USAGE log writer. Mirrors HeadlessChannel's writer so the
@@ -214,7 +223,7 @@ public partial class ChatViewModel : ReactiveViewModel
         }
     }
 
-    public void RequestAppShutdown()
+    public virtual void RequestAppShutdown()
     {
         Shutdown();
     }
@@ -279,6 +288,27 @@ public partial class ChatViewModel : ReactiveViewModel
     }
 
     /// <summary>
+    /// Denies the current pending approval interaction, if one exists.
+    /// Maps to the first-class <see cref="ApprovalOptionKeys.Deny"/> wire key,
+    /// so the session records a hard refusal of this call only (no ban on the
+    /// verb for future invocations). Called by the TUI when the user presses
+    /// Escape while an approval prompt is up — Escape means "cancel the
+    /// dialog", not "quit the app" (#1757).
+    /// </summary>
+    internal virtual Task DenyPendingInteractionAsync()
+    {
+        if (CurrentInteraction is null)
+            return Task.CompletedTask;
+
+        var denyOption = CurrentInteraction.Options.FirstOrDefault(candidate =>
+            string.Equals(candidate.Key.Value, ApprovalOptionKeys.Deny, StringComparison.Ordinal));
+        if (denyOption is null)
+            return Task.CompletedTask;
+
+        return SubmitInteractionSelectionAsync(denyOption.Key.Value);
+    }
+
+    /// <summary>
     /// Single-line headline of the current approval interaction, e.g.
     /// <c>"Approval required for shell_execute."</c>. Always fits in the
     /// Input panel regardless of how long the underlying command is.
@@ -288,7 +318,9 @@ public partial class ChatViewModel : ReactiveViewModel
         if (CurrentInteraction is not { } interaction)
             return "Approval required";
 
-        return $"Approval required for {interaction.ToolName}.";
+        return interaction.ToolName.IsMcp
+            ? $"MCP tool approval required: {interaction.ToolName}."
+            : $"Approval required for {interaction.ToolName}.";
     }
 
     /// <summary>
@@ -305,11 +337,12 @@ public partial class ChatViewModel : ReactiveViewModel
         if (CurrentInteraction is not { } interaction)
             return string.Empty;
 
-        var patterns = interaction.Patterns.Count > 0
+        var patterns = !interaction.ToolName.IsMcp && interaction.Patterns.Count > 0
             ? $" Patterns: {string.Join(", ", interaction.Patterns)}"
             : string.Empty;
 
-        var fullBody = $"{interaction.DisplayText}{patterns}";
+        var prefix = interaction.ToolName.IsMcp ? "Invocation: " : string.Empty;
+        var fullBody = $"{prefix}{interaction.DisplayText}{patterns}";
 
         if (IsApprovalDetailVisible.Value)
             return Netclaw.Channels.ApprovalDisplayTextFormatter.Truncate(fullBody, MaxExpandedApprovalBodyChars);
@@ -510,9 +543,12 @@ public partial class ChatViewModel : ReactiveViewModel
         RequestRedraw();
     }
 
-    private async Task SubmitInteractionSelectionAsync(string selectedKey)
+    protected virtual async Task SubmitInteractionSelectionAsync(string selectedKey)
     {
         if (CurrentInteraction is null)
+            return;
+
+        if (_isSubmittingInteraction)
             return;
 
         if (!_sessionReady || !_daemonClient.IsConnected)
@@ -527,6 +563,7 @@ public partial class ChatViewModel : ReactiveViewModel
 
         try
         {
+            _isSubmittingInteraction = true;
             await _daemonClient.EnsureSessionAsync(DaemonClient.TuiChannelType);
             await _daemonClient.RespondToInteractionAsync(pending.CallId.Value, selectedKey);
 
@@ -545,6 +582,10 @@ public partial class ChatViewModel : ReactiveViewModel
             StatusMessage.Value = $"Approval response failed ({ex.Message}). Reconnecting...";
             RequestRedraw();
             _ = ConnectUntilReadyAsync();
+        }
+        finally
+        {
+            _isSubmittingInteraction = false;
         }
     }
 

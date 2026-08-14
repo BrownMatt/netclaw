@@ -1,4 +1,4 @@
-﻿// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
 // <copyright file="NetclawAkkaHostingExtensions.cs" company="Petabridge, LLC">
 //      Copyright (C) 2026 - 2026 Petabridge, LLC <https://petabridge.com>
 // </copyright>
@@ -17,11 +17,14 @@ using Netclaw.Actors.Routing;
 using Netclaw.Actors.Serialization;
 using Netclaw.Actors.Sessions;
 using Netclaw.Actors.Tools;
+using Netclaw.Security;
 
 namespace Netclaw.Actors.Hosting;
 
 public static class NetclawAkkaHostingExtensions
 {
+    internal static readonly TimeSpan ReminderAckTimeout = TimeSpan.FromMinutes(70);
+
     public sealed record ReminderStorageOptions
     {
         public string? SqliteConnectionString { get; init; }
@@ -68,11 +71,8 @@ public static class NetclawAkkaHostingExtensions
     /// <summary>
     /// Registers the reminder manager as a singleton actor and wires
     /// the local Akka.Reminders scheduler to deliver payloads to it.
-    /// Uses Akka.Reminders' built-in default settings throughout — no
-    /// configuration surface exposed. If operators ever need to tune
-    /// <c>AckTimeout</c>, <c>MaxRetryBackoff</c>, or
-    /// <c>MaxDeliveryAttempts</c>, a configuration knob can be added at
-    /// that point. Right now: YAGNI.
+    /// Uses a 70-minute acknowledgement lease for one-hour LLM attempts.
+    /// Other Akka.Reminders settings use their library defaults.
     /// </summary>
     public static AkkaConfigurationBuilder WithReminderManager(
         this AkkaConfigurationBuilder builder,
@@ -86,6 +86,11 @@ public static class NetclawAkkaHostingExtensions
         return builder
             .WithLocalReminders(reminders =>
             {
+                reminders.WithSettings(new ReminderSettings
+                {
+                    AckTimeout = ReminderAckTimeout
+                });
+
                 if (!string.IsNullOrWhiteSpace(storageOptions?.SqliteConnectionString))
                 {
                     reminders.WithStorage(system =>
@@ -130,11 +135,18 @@ public static class NetclawAkkaHostingExtensions
 
     public static AkkaConfigurationBuilder WithBackgroundJobManager(
         this AkkaConfigurationBuilder builder)
+        => builder.WithBackgroundJobManager(
+            ShellExecutionEnvironment.CreateBash(ShellPlatform.Linux));
+
+    public static AkkaConfigurationBuilder WithBackgroundJobManager(
+        this AkkaConfigurationBuilder builder,
+        ShellExecutionEnvironment environment)
     {
+        ArgumentNullException.ThrowIfNull(environment);
         return builder.StartActors((system, registry, resolver) =>
         {
             var actor = system.ActorOf(
-                resolver.Props<BackgroundJobManagerActor>(),
+                resolver.Props<BackgroundJobManagerActor>(environment),
                 "background-job-manager");
             registry.Register<BackgroundJobManagerActorKey>(actor);
         });
@@ -176,13 +188,22 @@ public static class NetclawAkkaHostingExtensions
     public static AkkaConfigurationBuilder WithNetclawActors(
         this AkkaConfigurationBuilder builder,
         ReminderStorageOptions? reminderStorageOptions = null)
+        => builder.WithNetclawActors(
+            ShellExecutionEnvironment.CreateBash(ShellPlatform.Linux),
+            reminderStorageOptions);
+
+    public static AkkaConfigurationBuilder WithNetclawActors(
+        this AkkaConfigurationBuilder builder,
+        ShellExecutionEnvironment environment,
+        ReminderStorageOptions? reminderStorageOptions = null)
     {
+        ArgumentNullException.ThrowIfNull(environment);
         return builder
             .WithModelCapabilityCache()
             .WithSessionManager()
             .WithToolApprovalActor()
             .WithReminderManager(reminderStorageOptions)
-            .WithBackgroundJobManager();
+            .WithBackgroundJobManager(environment);
     }
 
     /// <summary>

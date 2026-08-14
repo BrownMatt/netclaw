@@ -1,4 +1,4 @@
-﻿// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
 // <copyright file="McpCommandTests.cs" company="Petabridge, LLC">
 //      Copyright (C) 2026 - 2026 Petabridge, LLC <https://petabridge.com>
 // </copyright>
@@ -291,6 +291,92 @@ public sealed class McpCommandTests : IDisposable
         Assert.Equal("All", personal.GetProperty("McpServersMode").GetString());
     }
 
+    // ── Add-time unconditional OAuth hint ──
+    //
+    // The daemon owns OAuth discovery (RFC 9728/8414, via McpOAuthClientRegistrar).
+    // The CLI does not probe the endpoint; it prints an unconditional hint for any
+    // HTTP/SSE server added without an explicit Authorization header.
+
+    [Theory]
+    [InlineData("stdio")]
+    [InlineData("http-with-header")]
+    public async Task Add_DoesNotPrintOAuthHint_ForStdioOrExplicitAuthorizationHeader(string scenario)
+    {
+        var args = scenario is "stdio"
+            ? new[] { "mcp", "add", "--transport", "stdio", "local", "--", "npx", "-y", "@local/mcp" }
+            : new[] { "mcp", "add", "--transport", "http", "--header", "Authorization: Bearer test-token", "myapi", "https://api.example.com/mcp" };
+
+        var exitCode = await McpCommand.RunAsync(args, _paths, output: _output);
+
+        Assert.Equal(0, exitCode);
+
+        var output = _output.ToString();
+        Assert.DoesNotContain("Next steps:", output);
+        Assert.DoesNotContain("netclaw mcp auth", output);
+        Assert.Contains("Next: run `netclaw mcp permissions`", output);
+    }
+
+    [Fact]
+    public async Task Add_HttpServerWithoutAuthorizationHeader_PrintsUnconditionalAuthHint()
+    {
+        var args = new[] { "mcp", "add", "--transport", "http", "plain", "https://plain.example/mcp" };
+        var exitCode = await McpCommand.RunAsync(args, _paths, output: _output);
+
+        Assert.Equal(0, exitCode);
+
+        var output = _output.ToString();
+        Assert.Contains("Next steps:", output);
+        Assert.Contains("If this server requires OAuth, authorize first: netclaw mcp auth plain", output);
+        Assert.Contains("Then grant tools: netclaw mcp permissions", output);
+    }
+
+    [Fact]
+    public async Task Add_WithAuthFlag_NoDaemon_PrintsFallbackHint()
+    {
+        var args = new[] { "mcp", "add", "--auth", "--transport", "http", "notion", "https://mcp.notion.com/mcp" };
+        var exitCode = await McpCommand.RunAsync(args, _paths, output: _output);
+
+        Assert.Equal(0, exitCode);
+
+        var output = _output.ToString();
+        Assert.Contains("Next steps:", output);
+        Assert.Contains("authorize first: netclaw mcp auth notion", output);
+        Assert.Contains("--auth: daemon API not available. Run `netclaw mcp auth notion` once the daemon is running.", output);
+    }
+
+    [Fact]
+    public async Task Add_WithAuthFlag_DaemonRejects_PropagatesAuthErrorForAddedServer()
+    {
+        var args = new[] { "mcp", "add", "--auth", "--transport", "http", "notion", "https://mcp.notion.com/mcp" };
+        var daemonApi = CreateDaemonApi(request => request.RequestUri!.AbsolutePath switch
+        {
+            "/api/mcp/oauth/start/notion" => new HttpResponseMessage(HttpStatusCode.Forbidden),
+            _ => new HttpResponseMessage(HttpStatusCode.NotFound),
+        });
+
+        var exitCode = await McpCommand.RunAsync(
+            args, _paths, daemonApi, output: _output);
+
+        // The auth flow must target the added server ('notion'), not the '--auth'
+        // flag position — a wrong name would print "MCP server '--auth' not found."
+        Assert.Equal(1, exitCode);
+        Assert.Contains("HTTP 403 Forbidden", _output.ToString());
+        Assert.Contains("notion", _output.ToString());
+    }
+
+    [Fact]
+    public async Task Add_WithAuthFlag_OnStdio_Ignored()
+    {
+        var args = new[] { "mcp", "add", "--auth", "--transport", "stdio", "local", "--", "npx", "-y", "@local/mcp" };
+        var exitCode = await McpCommand.RunAsync(args, _paths, output: _output);
+
+        Assert.Equal(0, exitCode);
+
+        var output = _output.ToString();
+        Assert.Contains("--auth ignored: OAuth is only for HTTP/SSE servers.", output);
+        Assert.Contains("netclaw mcp permissions", output);
+    }
+
     [Fact]
     public async Task List_NoServers_ShowsEmptyMessage()
     {
@@ -477,7 +563,7 @@ public sealed class McpCommandTests : IDisposable
     {
         var lines = new Queue<string?>([
             "not-a-url",
-            "http://127.0.0.1:5199/api/mcp/oauth/callback?code=auth-code&state=flow-state"
+            "http://127.0.0.1:5199/api/mcp/oauth/callback?code=auth-code&state=flow-state&iss=https%3A%2F%2Fauth.example"
         ]);
 
         var submissions = 0;
@@ -486,11 +572,14 @@ public sealed class McpCommandTests : IDisposable
         var result = await McpCommand.ReadPasteRedirectAsync(
             output,
             _ => Task.FromResult(lines.Dequeue()),
-            (code, state, _) =>
+            (code, state, iss, _) =>
             {
                 submissions++;
                 Assert.Equal("auth-code", code);
                 Assert.Equal("flow-state", state);
+                // The MCP SDK validates iss per RFC 9207. Dropping it here makes every
+                // headless authorization fail against a server that advertises it.
+                Assert.Equal("https://auth.example", iss);
                 return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK));
             },
             CancellationToken.None);
@@ -514,7 +603,7 @@ public sealed class McpCommandTests : IDisposable
         var result = await McpCommand.ReadPasteRedirectAsync(
             output,
             _ => Task.FromResult(lines.Dequeue()),
-            (code, _, _) =>
+            (code, _, _, _) =>
             {
                 submissions++;
                 var status = code == "bad-code"
@@ -538,6 +627,40 @@ public sealed class McpCommandTests : IDisposable
 
         Assert.False(copied);
         Assert.Equal(string.Empty, output.ToString());
+    }
+
+    [Fact]
+    public async Task Auth_EmptyErrorBodyFallsBackToHttpStatusAndReason()
+    {
+        await McpCommand.RunAsync(
+            ["mcp", "add", "--transport", "http", "oauth", "https://mcp.example/mcp"],
+            _paths,
+            output: _output);
+        var daemonApi = CreateDaemonApi(request => request.RequestUri!.AbsolutePath switch
+        {
+            "/api/mcp/oauth/start/oauth" => new HttpResponseMessage(HttpStatusCode.Forbidden),
+            _ => new HttpResponseMessage(HttpStatusCode.NotFound),
+        });
+        var output = new StringWriter();
+
+        var exitCode = await McpCommand.RunAsync(["mcp", "auth", "oauth"], _paths, daemonApi, output);
+
+        Assert.Equal(1, exitCode);
+        Assert.Contains("HTTP 403 Forbidden", output.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("Error: \n", output.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ReadMcpError_MalformedBodyFallsBackToHttpStatusAndReason()
+    {
+        using var response = new HttpResponseMessage(HttpStatusCode.BadGateway)
+        {
+            Content = new StringContent("not-json", Encoding.UTF8, "text/plain"),
+        };
+
+        var message = await McpCommand.ReadMcpErrorAsync(response);
+
+        Assert.Equal("HTTP 502 Bad Gateway", message);
     }
 
     private static JsonDocument ReadConfigFile(string path)

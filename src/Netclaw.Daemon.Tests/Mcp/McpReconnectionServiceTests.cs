@@ -33,6 +33,8 @@ public sealed class McpReconnectionServiceTests
         await service.CheckAndReconnectAsync(CancellationToken.None);
 
         Assert.Equal(0, _reconnectable.ReconnectCallCount);
+        // Only the Connected server gets a catalog refresh; AwaitingAuth/AuthFailed/Disabled do not.
+        Assert.Equal(1, _reconnectable.RefreshCallCount);
     }
 
     [Fact]
@@ -181,8 +183,11 @@ public sealed class McpReconnectionServiceTests
     {
         private readonly Dictionary<McpServerName, McpServerStatus> _statuses = new();
         private int _reconnectCallCount;
+        private int _refreshCallCount;
 
         public int ReconnectCallCount => Volatile.Read(ref _reconnectCallCount);
+
+        public int RefreshCallCount => Volatile.Read(ref _refreshCallCount);
 
         public Func<McpServerName, CancellationToken, Task<bool>>? OnReconnect { get; set; }
 
@@ -191,7 +196,8 @@ public sealed class McpReconnectionServiceTests
             var serverName = new McpServerName(name);
             _statuses[serverName] = new McpServerStatus(
                 serverName, state, toolCount,
-                state == McpConnectionState.Unreachable ? "test error" : null);
+                state == McpConnectionState.Unreachable ? "test error" : null,
+                state == McpConnectionState.Unreachable ? DateTimeOffset.Parse("2026-05-01T00:00:00Z") : null);
         }
 
         public IReadOnlyDictionary<McpServerName, McpServerStatus> GetServerStatuses() => _statuses;
@@ -202,6 +208,12 @@ public sealed class McpReconnectionServiceTests
             if (OnReconnect is not null)
                 return await OnReconnect(serverName, ct);
             return false;
+        }
+
+        public Task<bool> TryRefreshCatalogAsync(McpServerName serverName, CancellationToken ct = default)
+        {
+            Interlocked.Increment(ref _refreshCallCount);
+            return Task.FromResult(true);
         }
     }
 

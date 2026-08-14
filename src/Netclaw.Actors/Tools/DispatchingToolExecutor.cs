@@ -19,28 +19,13 @@ namespace Netclaw.Actors.Tools;
 /// Routes <see cref="FunctionCallContent"/> to the correct tool by name via the <see cref="ToolRegistry"/>.
 /// Logs every tool execution with name, duration, and result preview.
 /// </summary>
-public sealed class DispatchingToolExecutor : IToolExecutor
+public sealed class DispatchingToolExecutor : IToolExecutor, ISessionScratchRetryAwareExecutor
 {
     private readonly ToolRegistry _registry;
     private readonly ToolAccessPolicy _policy;
     private readonly IToolApprovalService? _approvalService;
+    private readonly ShellPolicyCoordinator _shellPolicyCoordinator;
     private readonly ILogger _logger;
-
-    public DispatchingToolExecutor(ToolRegistry registry, ILogger<DispatchingToolExecutor>? logger = null)
-        : this(
-            registry,
-            new ToolAccessPolicy(
-                new ToolConfig { ShellMode = ShellExecutionMode.HostAllowed },
-                new EffectivePolicyDefaults(
-                DeploymentPosture.Personal,
-                TrustAudience.Personal,
-                ShellExecutionMode.HostAllowed,
-                UsedStrictFallback: false),
-                new ShellCommandPolicy()),
-            approvalService: null,
-            logger)
-    {
-    }
 
     public DispatchingToolExecutor(ToolRegistry registry, ToolAccessPolicy policy,
         IToolApprovalService? approvalService = null, ILogger<DispatchingToolExecutor>? logger = null)
@@ -48,6 +33,7 @@ public sealed class DispatchingToolExecutor : IToolExecutor
         _registry = registry;
         _policy = policy;
         _approvalService = approvalService;
+        _shellPolicyCoordinator = new ShellPolicyCoordinator(policy, approvalService);
         _logger = logger ?? (ILogger)NullLogger.Instance;
     }
 
@@ -168,12 +154,20 @@ public sealed class DispatchingToolExecutor : IToolExecutor
             return rejection.Message;
         }
 
-        var tool = await AuthorizeCoreAsync(toolCall, context, ct);
+        var authorized = await GetAuthorizedToolAsync(toolCall, context, ct);
+        var tool = authorized.Tool;
 
         var sw = Stopwatch.StartNew();
         try
         {
-            var result = await tool.ExecuteAsync(toolCall.Arguments, context.Invocation, ct);
+            var result = tool is ShellTool shellTool
+                         && authorized.AuthorizedAnalysis is { } shellAnalysis
+                ? await shellTool.ExecuteAuthorizedAsync(
+                    toolCall.Arguments,
+                    context.Invocation,
+                    shellAnalysis,
+                    ct)
+                : await tool.ExecuteAsync(toolCall.Arguments, context.Invocation, ct);
 
             var redacted = SecretOutputRedactor.Redact(result);
 
@@ -210,7 +204,7 @@ public sealed class DispatchingToolExecutor : IToolExecutor
 
     public async Task AuthorizeAsync(FunctionCallContent toolCall, ToolExecutionContext context, CancellationToken ct = default)
     {
-        _ = await AuthorizeCoreAsync(toolCall, context, ct);
+        _ = await GetAuthorizedToolAsync(toolCall, context, ct);
     }
 
     // The tool's own override (verbose tools like shell opt down) wins; otherwise
@@ -247,9 +241,18 @@ public sealed class DispatchingToolExecutor : IToolExecutor
         // Authorization throws (ToolApprovalRequiredException / ToolAccessDeniedException)
         // before the first item is produced; the tool-execution pipeline handles
         // those exactly as it does for the non-streaming path.
-        var tool = await AuthorizeCoreAsync(toolCall, context, ct);
+        var authorized = await GetAuthorizedToolAsync(toolCall, context, ct);
+        var tool = authorized.Tool;
+        var updates = tool is ShellTool shellTool
+                      && authorized.AuthorizedAnalysis is { } shellAnalysis
+            ? shellTool.ExecuteAuthorizedStreamAsync(
+                toolCall.Arguments,
+                context.Invocation,
+                shellAnalysis,
+                ct)
+            : tool.ExecuteStreamAsync(toolCall.Arguments, context.Invocation, ct);
         var sw = Stopwatch.StartNew();
-        await foreach (var update in tool.ExecuteStreamAsync(toolCall.Arguments, context.Invocation, ct))
+        await foreach (var update in updates)
         {
             switch (update)
             {
@@ -274,89 +277,113 @@ public sealed class DispatchingToolExecutor : IToolExecutor
         }
     }
 
-    private async Task<INetclawTool> AuthorizeCoreAsync(FunctionCallContent toolCall, ToolExecutionContext context, CancellationToken ct)
+    /// <summary>
+    /// Evaluates the complete authorization gate before a tool runs or a user receives a prompt.
+    /// </summary>
+    /// <remarks>
+    /// This method returns expected authorization outcomes instead of exceptions.
+    /// Execution adapters translate the result into the existing pipeline exceptions.
+    /// </remarks>
+    internal async Task<ToolAuthorizationDecision> EvaluateAuthorizationAsync(
+        FunctionCallContent toolCall,
+        ToolExecutionContext context,
+        CancellationToken ct)
+        => (await EvaluateAuthorizationResultAsync(toolCall, context, ct)).Decision;
+
+    private async Task<(ToolAuthorizationDecision Decision, ShellCommandAnalysis? AuthorizedAnalysis)>
+        EvaluateAuthorizationResultAsync(
+            FunctionCallContent toolCall,
+            ToolExecutionContext context,
+            CancellationToken ct)
     {
         context.Approval.ClearAppliedDecision();
 
         var tool = _registry.GetByName(toolCall.Name);
         if (tool is null)
         {
-            _logger.LogWarning("Unknown tool requested: {ToolName}", toolCall.Name);
-            throw new ToolAccessDeniedException("tool_not_found");
+            var missingToolDecision = ToolAuthorizationDecision.Deny("tool_not_found");
+            LogAuthorizationDecision(toolCall.Name, missingToolDecision);
+            return (missingToolDecision, null);
+        }
+
+        if (string.Equals(tool.Name, ShellTool.ToolName, StringComparison.Ordinal))
+        {
+            ShellPolicyAuthorization shellAuthorization;
+            try
+            {
+                var preflight = _policy.AuthorizeShellPreflight(
+                    tool,
+                    context,
+                    toolCall.Arguments);
+                shellAuthorization = await _shellPolicyCoordinator.EvaluateAsync(
+                    tool,
+                    toolCall,
+                    context,
+                    preflight,
+                    ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception)
+            {
+                shellAuthorization = ShellPolicyCoordinator.CompleteInternalFailure();
+            }
+
+            LogAuthorizationDecision(toolCall.Name, shellAuthorization.Decision);
+            return (shellAuthorization.Decision, shellAuthorization.AuthorizedAnalysis);
         }
 
         var accessDecision = _policy.AuthorizeInvocation(tool, context, toolCall.Arguments);
+        IReadOnlyList<ToolApprovalMatch> approvalMatches = [];
 
         if (accessDecision.NeedsApproval && _approvalService is not null)
         {
             var approvalContext = accessDecision.ApprovalContext
                 ?? throw new InvalidOperationException("Approval decision missing approval context.");
+            var candidatesForCheck = approvalContext.Candidates is { Count: > 0 } candidates
+                ? candidates.ToList()
+                : approvalContext.CandidateVerbs
+                    .Select(verb => new ApprovalCandidate(verb, Directory: null))
+                    .ToList();
 
-            // Cwd resolution happens upstream in ToolAccessPolicy.CheckApprovalGate
-            // for shell tools, so the attempt Cwd is already populated when the
-            // gate produced an approval context. Other tools have no
-            // directory anchor; cwd stays null.
-
-            // Messy commands cannot be persistently approved — the matcher
-            // refuses to extract verb chains we could match a future
-            // invocation against. Always round-trip through the user, even if
-            // the candidate-verbs list happens to be empty for unrelated
-            // reasons (which would otherwise short-circuit to allow).
-            if (approvalContext.IsMessy)
+            if (candidatesForCheck.Count > 0)
             {
-                accessDecision = ToolAccessDecision.RequiresApproval(approvalContext);
-            }
-            else
-            {
-                var audience = context.Audience;
+                var approvalCheck = await _approvalService.CheckApprovalAsync(
+                    ToApprovalSessionId(context.SessionId),
+                    context.Audience,
+                    new ToolName(tool.Name),
+                    candidatesForCheck,
+                    context.Approval.Cwd,
+                    ct);
+                approvalMatches = approvalCheck.ApprovedMatches;
+                var hasExactCandidateChecks = TryGetExactUnapprovedCandidates(
+                    approvalCheck,
+                    candidatesForCheck,
+                    out _);
+                var hasInconsistentCandidateChecks = approvalCheck.CandidateChecks is not null
+                                                     && !hasExactCandidateChecks;
+                var storeUnavailableForMiss = approvalCheck.PersistentStoreFailure is not null
+                                              && approvalCheck.UnapprovedPatterns.Count > 0;
 
-                // Pure side-effect candidates (echo "X" with no path/redirect,
-                // bash :, true/false) are not persisted on Always-here clicks
-                // and must also be treated as authorized at match time —
-                // otherwise the matcher would see them as unapproved on retry
-                // after the click, throw ToolApprovalRequiredException again,
-                // and fail the turn (the outer try/catch is already inside
-                // the conditional catch so a re-throw escapes).
-                var candidatesForCheck = approvalContext.Candidates is { Count: > 0 } candidates
-                    ? candidates
-                        .Where(c => !ApprovalPatternMatching.IsPureSideEffect(c))
-                        .ToList()
-                    : approvalContext.CandidateVerbs
-                        .Select(verb => new ApprovalCandidate(verb, Directory: null))
-                        .ToList();
-
-                if (candidatesForCheck.Count == 0)
+                if (storeUnavailableForMiss)
                 {
-                    // Every candidate is side-effect-only — auto-allow.
-                    accessDecision = ToolAccessDecision.Allow();
+                    accessDecision = IsOneTimeApprovalSatisfied(context, toolCall, approvalContext)
+                        ? ToolAccessDecision.Allow(ToolAllowReason.OneTimeApproval)
+                        : ToolAccessDecision.Deny("approval_store_unavailable");
+                }
+                else if (approvalCheck.UnapprovedPatterns.Count == 0
+                         && !hasInconsistentCandidateChecks)
+                {
+                    context.Approval.ApplyDecision(
+                        "PreviouslyApproved",
+                        FormatApprovalMatches(approvalCheck.ApprovedMatches));
+                    accessDecision = ToolAccessDecision.Allow(ToolAllowReason.StoredApproval);
                 }
                 else
                 {
-                    // Use tool.Name (canonical) — not toolCall.Name — so the
-                    // lookup key matches what PersistApprovalCandidatesAsync
-                    // stored. For MCP tools the LLM-facing name is the
-                    // sanitized alias (`server__tool`), while the policy
-                    // builds the approval context — and the session actor
-                    // records the grant — under the canonical `server/tool`.
-                    // Looking up by the sanitized alias here would miss every
-                    // grant and re-throw ToolApprovalRequiredException on
-                    // approved retries.
-                    var approvalCheck = await _approvalService.CheckApprovalAsync(
-                        ToApprovalSessionId(context.SessionId),
-                        audience,
-                        new ToolName(tool.Name),
-                        candidatesForCheck,
-                        context.Approval.Cwd,
-                        ct);
-
-                    if (approvalCheck.UnapprovedPatterns.Count == 0)
-                        context.Approval.ApplyDecision(
-                            "PreviouslyApproved",
-                            FormatApprovalMatches(approvalCheck.ApprovedMatches));
-
-                    accessDecision = approvalCheck.UnapprovedPatterns.Count == 0
-                        ? ToolAccessDecision.Allow()
-                        : ToolAccessDecision.RequiresApproval(approvalContext);
+                    accessDecision = ToolAccessDecision.RequiresApproval(approvalContext);
                 }
             }
         }
@@ -364,26 +391,161 @@ public sealed class DispatchingToolExecutor : IToolExecutor
         if (accessDecision.NeedsApproval
             && IsOneTimeApprovalSatisfied(context, toolCall, accessDecision.ApprovalContext))
         {
+            accessDecision = ToolAccessDecision.Allow(ToolAllowReason.OneTimeApproval);
+        }
+
+        var authorizationDecision = CompleteAuthorizationDecision(accessDecision, approvalMatches);
+        LogAuthorizationDecision(toolCall.Name, authorizationDecision);
+        return (authorizationDecision, null);
+    }
+
+    void ISessionScratchRetryAwareExecutor.MarkSessionScratchRetry(
+        ToolExecutionContext context,
+        ToolAgentCorrection.SessionScratchSuggested correction)
+        => _policy.MarkSessionScratchRetry(context, correction);
+
+    ApprovalShell ISessionScratchRetryAwareExecutor.Shell => _policy.Shell;
+
+    private async Task<(INetclawTool Tool, ShellCommandAnalysis? AuthorizedAnalysis)>
+        GetAuthorizedToolAsync(
+        FunctionCallContent toolCall,
+        ToolExecutionContext context,
+        CancellationToken ct)
+    {
+        var authorization = await EvaluateAuthorizationResultAsync(toolCall, context, ct);
+        var decision = authorization.Decision;
+
+        if (decision.Outcome is ToolAuthorizationOutcome.RequiresApproval)
+        {
+            throw new ToolApprovalRequiredException(
+                decision.ApprovalContext
+                ?? throw new InvalidOperationException("Approval decision missing approval context."));
+        }
+
+        if (decision.Outcome is ToolAuthorizationOutcome.Denied)
+        {
+            throw new ToolAccessDeniedException(
+                decision.DenyReason
+                ?? throw new InvalidOperationException("Denied decision missing a deny reason."));
+        }
+
+        var tool = _registry.GetByName(toolCall.Name)
+                   ?? throw new InvalidOperationException(
+                       "Allowed decision is missing its registered tool.");
+        return (tool, authorization.AuthorizedAnalysis);
+    }
+
+    private static ToolAuthorizationDecision CompleteAuthorizationDecision(
+        ToolAccessDecision accessDecision,
+        IReadOnlyList<ToolApprovalMatch> approvalMatches)
+        => ToolAuthorizationDecision.From(accessDecision, approvalMatches);
+
+    private static bool TryGetExactUnapprovedCandidates(
+        ToolApprovalCheckResult result,
+        IReadOnlyList<ApprovalCandidate> checkedCandidates,
+        out IReadOnlyList<ApprovalCandidate> unapprovedCandidates)
+    {
+        unapprovedCandidates = [];
+        if (result.CandidateChecks is not { } candidateChecks
+            || candidateChecks.Count != checkedCandidates.Count)
+        {
+            return false;
+        }
+
+        var exactUnapprovedCandidates = new List<ApprovalCandidate>();
+        var exactUnapprovedPatterns = new List<string>();
+        var exactApprovedMatches = new List<ToolApprovalMatch>();
+        for (var index = 0; index < candidateChecks.Count; index++)
+        {
+            var check = candidateChecks[index];
+            var checkedCandidate = checkedCandidates[index];
+            if (!HasSameCandidateFacts(check.Candidate, checkedCandidate))
+                return false;
+
+            if (check.ApprovedMatch is { } approvedMatch)
+                exactApprovedMatches.Add(approvedMatch);
+            else
+            {
+                exactUnapprovedCandidates.Add(checkedCandidate);
+                exactUnapprovedPatterns.Add(checkedCandidate.Verb);
+            }
+        }
+
+        if (!exactUnapprovedPatterns.SequenceEqual(
+                result.UnapprovedPatterns,
+                StringComparer.OrdinalIgnoreCase)
+            || !exactApprovedMatches.SequenceEqual(result.ApprovedMatches))
+        {
+            return false;
+        }
+
+        unapprovedCandidates = exactUnapprovedCandidates;
+        return true;
+    }
+
+    private static bool HasSameCandidateFacts(
+        ApprovalCandidate first,
+        ApprovalCandidate second) =>
+        string.Equals(first.Verb, second.Verb, StringComparison.Ordinal) &&
+        string.Equals(first.Directory, second.Directory, StringComparison.Ordinal) &&
+        first.Shell == second.Shell &&
+        ((first.VerbTokens is null && second.VerbTokens is null) ||
+         (first.VerbTokens is not null &&
+          second.VerbTokens is not null &&
+          first.VerbTokens.SequenceEqual(second.VerbTokens, StringComparer.Ordinal)));
+
+    private void LogAuthorizationDecision(string toolName, ToolAuthorizationDecision decision)
+    {
+        switch (decision.Outcome)
+        {
+            case ToolAuthorizationOutcome.Allowed:
+                var allowReason = decision.AllowReason
+                    ?? throw new InvalidOperationException("Allowed decision missing an allow reason.");
+                _logger.LogDebug(
+                    "Tool authorization evaluated: {ToolName} outcome={AuthorizationOutcome} " +
+                    "reason={AuthorizationReason} explanation={AuthorizationExplanation}",
+                    toolName,
+                    decision.Outcome.ToString(),
+                    allowReason.ToString(),
+                    allowReason.GetDescription());
+                break;
+            case ToolAuthorizationOutcome.RequiresApproval:
+                _logger.LogInformation(
+                    "Tool authorization evaluated: {ToolName} outcome={AuthorizationOutcome}",
+                    toolName,
+                    decision.Outcome.ToString());
+                break;
+            case ToolAuthorizationOutcome.Denied:
+                _logger.LogWarning(
+                    "Tool authorization evaluated: {ToolName} outcome={AuthorizationOutcome} reason={AuthorizationReason}",
+                    toolName,
+                    decision.Outcome.ToString(),
+                    decision.DenyReason);
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(decision), decision.Outcome, "Unknown authorization outcome.");
+        }
+
+        LogShellPolicyTrace(decision.ShellPolicyTrace);
+    }
+
+    internal void LogShellPolicyTrace(ShellPolicyDecisionTrace trace)
+    {
+        foreach (var row in trace.Rows)
+        {
             _logger.LogInformation(
-                "Applying one-time approval bypass for tool {ToolName} in session {SessionId}",
-                toolCall.Name,
-                context.SessionId ?? "unknown");
-            accessDecision = ToolAccessDecision.Allow();
+                "Shell policy trace: stage={PolicyStage} outcome={PolicyOutcome} reason={PolicyReason} " +
+                "candidate_id={CandidateId} executable={ExecutableBasename} " +
+                "coverage={CoverageKind} scope_relation={ScopeRelation} grant_timestamp={GrantTimestamp}",
+                row.Stage.ToString(),
+                row.Outcome.ToString(),
+                row.Reason.ToString(),
+                row.CandidateId?.Value,
+                row.ExecutableBasename,
+                row.Coverage.ToString(),
+                row.ScopeRelation.ToString(),
+                row.GrantTimestamp);
         }
-
-        if (accessDecision.NeedsApproval)
-        {
-            _logger.LogInformation("Tool requires approval: {ToolName}", toolCall.Name);
-            throw new ToolApprovalRequiredException(accessDecision.ApprovalContext!);
-        }
-
-        if (!accessDecision.Allowed)
-        {
-            _logger.LogWarning("Tool denied by policy: {ToolName} reason={Reason}", toolCall.Name, accessDecision.DenyReason);
-            throw new ToolAccessDeniedException(accessDecision.DenyReason ?? "tool_denied");
-        }
-
-        return tool;
     }
 
     private static string FormatApprovalMatches(IReadOnlyList<ToolApprovalMatch> matches)
@@ -400,32 +562,16 @@ public sealed class DispatchingToolExecutor : IToolExecutor
         if (approvalContext is null)
             return false;
 
-        // Tool-name match is required for any one-time bypass — without it
-        // we could never tell which tool the grant applies to.
-        if (!string.IsNullOrEmpty(context.Approval.OneTimeApprovedToolName)
-            && !string.Equals(context.Approval.OneTimeApprovedToolName, toolCall.Name, StringComparison.Ordinal))
-            return false;
-
-        // By this point: either OneTimeApprovedToolName is empty (no
-        // bypass active), or it matched toolCall.Name above. Messy commands
-        // have no extractable patterns, so an active per-tool ApprovedOnce
-        // bypass is the only signal we can use — without this branch a
-        // retry would hit the empty-patterns guard below and throw
-        // ToolApprovalRequiredException. The pipeline clears
-        // OneTimeApprovedToolName after the retry, so the bypass cannot
-        // leak into a subsequent call.
-        if (approvalContext.IsMessy && !string.IsNullOrEmpty(context.Approval.OneTimeApprovedToolName))
-            return true;
-
-        if (context.Approval.OneTimeApprovedPatterns.Count == 0)
-            return false;
-
-        if (approvalContext.Patterns.Count == 0)
-            return false;
-
-        if (string.IsNullOrEmpty(context.Approval.OneTimeApprovedToolName))
-            return false;
-
-        return approvalContext.Patterns.All(pattern => context.Approval.OneTimeApprovedPatterns.Contains(pattern));
+        // Patterns bind the authored approval units. Candidate keys bind the
+        // filtered verb and effective-directory set that the user approved.
+        // Exact equality forces a new prompt when a formerly safe candidate
+        // becomes unsafe before the retry, for example after a symlink swap.
+        // An unchanged messy command has an empty key set on both attempts,
+        // while a clean-to-messy transition cannot match its original keys.
+        return OneTimeApprovalKeys.Matches(
+            context.Approval.OneTimeApprovedToolName,
+            context.Approval.OneTimeApprovedPatterns,
+            toolCall.Name,
+            approvalContext);
     }
 }

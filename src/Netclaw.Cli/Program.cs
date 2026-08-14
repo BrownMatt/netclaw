@@ -1,4 +1,4 @@
-﻿// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
 // <copyright file="Program.cs" company="Petabridge, LLC">
 //      Copyright (C) 2026 - 2026 Petabridge, LLC <https://petabridge.com>
 // </copyright>
@@ -228,40 +228,56 @@ static async Task RunAsync(string[] args)
         var runner = scope.ServiceProvider.GetRequiredService<DoctorRunner>();
         var fixService = scope.ServiceProvider.GetRequiredService<DoctorFixService>();
 
-        DoctorFixPlan? fixPlan = null;
-        if (doctorOptions!.Fix)
+        try
         {
-            fixPlan = await fixService.BuildPlanAsync();
-            if (doctorOptions.Format is DoctorOutputFormat.Text)
-                WriteDoctorFixPlan(fixPlan, doctorOptions.DryRun);
-
-            if (fixPlan.HasChanges && !doctorOptions.DryRun)
+            DoctorFixPlan? fixPlan = null;
+            if (doctorOptions!.Fix)
             {
-                var shouldApply = doctorOptions.Yes || PromptForDoctorFixApply();
-                if (shouldApply)
-                    await fixService.ApplyAsync(fixPlan);
+                fixPlan = await fixService.BuildPlanAsync();
+                if (doctorOptions.Format is DoctorOutputFormat.Text)
+                    WriteDoctorFixPlan(fixPlan, doctorOptions.DryRun);
+
+                if (fixPlan.HasChanges && !doctorOptions.DryRun)
+                {
+                    var shouldApply = doctorOptions.Yes || PromptForDoctorFixApply();
+                    if (shouldApply)
+                        await fixService.ApplyAsync(fixPlan);
+                }
             }
+
+            var result = await runner.RunAsync();
+
+            if (doctorOptions.Format is DoctorOutputFormat.Json)
+                WriteDoctorJsonResult(result, fixPlan, doctorOptions);
+            else
+                WriteDoctorResult(result);
+
+            // Hint about --fix when there are issues and fix wasn't requested
+            if (!doctorOptions.Fix
+                && result.ExitCode != 0
+                && doctorOptions.Format is DoctorOutputFormat.Text)
+            {
+                fixPlan ??= await fixService.BuildPlanAsync();
+                if (fixPlan.HasChanges)
+                    Console.WriteLine("hint: Some issues may be auto-fixable. Run `netclaw doctor --fix --dry-run` to preview.");
+            }
+
+            Environment.ExitCode = result.ExitCode;
+            return;
         }
-
-        var result = await runner.RunAsync();
-
-        if (doctorOptions.Format is DoctorOutputFormat.Json)
-            WriteDoctorJsonResult(result, fixPlan, doctorOptions);
-        else
-            WriteDoctorResult(result);
-
-        // Hint about --fix when there are issues and fix wasn't requested
-        if (!doctorOptions.Fix
-            && result.ExitCode != 0
-            && doctorOptions.Format is DoctorOutputFormat.Text)
+        catch (ModelConfigurationException ex)
         {
-            fixPlan ??= await fixService.BuildPlanAsync();
-            if (fixPlan.HasChanges)
-                Console.WriteLine("hint: Some issues may be auto-fixable. Run `netclaw doctor --fix --dry-run` to preview.");
-        }
+            var failure = new DoctorRunResult(
+                [DoctorCheckResult.Error("model-configuration", ex.Message)],
+                ExitCode: 1);
+            if (doctorOptions!.Format is DoctorOutputFormat.Json)
+                WriteDoctorJsonResult(failure, fixPlan: null, doctorOptions);
+            else
+                Console.WriteLine($"Error: {ex.Message}");
 
-        Environment.ExitCode = result.ExitCode;
-        return;
+            Environment.ExitCode = 1;
+            return;
+        }
     }
 
     if (mode is "status")
@@ -845,9 +861,41 @@ static async Task RunAsync(string[] args)
     // ── Skill management ──
     if (mode is "skill")
     {
+        var skillSubcommand = args.Length > 1 ? args[1] : "list";
+        if (skillSubcommand is "list")
+        {
+            // `skill list` is served by the daemon's live registry — the only view
+            // that includes dynamic MCP prompt skills. It requires the daemon; when
+            // the daemon is unavailable, SkillCommand reports that and exits non-zero
+            // (no disk fallback). Building the DI host parses local config
+            // (netclaw.json, secrets.json); a corrupt file must produce a readable
+            // error, not a stack trace — the old disk-scan list never read those
+            // files, so this path must not make them a new way to crash.
+            try
+            {
+                var builder = Host.CreateApplicationBuilder(args);
+                ConfigureConfigServices(builder.Services, builder.Configuration);
+                builder.Logging.ClearProviders();
+                builder.Logging.SetMinimumLevel(LogLevel.Warning);
+                using var skillHost = builder.Build();
+                var skillPaths = skillHost.Services.GetRequiredService<NetclawPaths>();
+                skillPaths.EnsureDirectoriesExist();
+                var skillDaemonApi = skillHost.Services.GetRequiredService<DaemonApi>();
+                Environment.ExitCode = await SkillCommand.RunAsync(args, skillPaths, skillDaemonApi);
+            }
+            catch (Exception ex) when (ex is InvalidDataException or InvalidOperationException or FormatException)
+            {
+                Console.Error.WriteLine($"skill list: could not load local configuration: {ex.Message}");
+                Console.Error.WriteLine("Fix the file it names (under ~/.netclaw/config) and retry.");
+                Environment.ExitCode = 1;
+            }
+
+            return;
+        }
+
+        // All other skill subcommands are offline filesystem operations — no daemon needed.
         var paths = new NetclawPaths();
         paths.EnsureDirectoriesExist();
-        // All skill subcommands are offline — no daemon needed
         Environment.ExitCode = await SkillCommand.RunAsync(args, paths);
         return;
     }

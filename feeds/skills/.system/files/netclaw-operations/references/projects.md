@@ -13,8 +13,12 @@ SOUL/AGENTS/TOOLING layers.
 Use `set_working_directory` to set or change the project directory:
 
 ```
-set_working_directory(path: "/home/user/workspaces/akadonic")
+set_working_directory(path: "/workspace/service")
 ```
+
+An absolute shell path gives approval policy an exact candidate scope. It does
+not add that directory as a safe-space root. When the declaration tool is
+available, declare a different user-named project before several shell calls.
 
 Rules:
 
@@ -27,6 +31,12 @@ Rules:
 - The project directory persists across crash/restart via `WorkingContext`
 - The `[working-context]` block includes `project_dir:` so you always know which
   project is active
+- Do not call the tool again when `project_dir` already names the right project
+- A failed call does not change the project directory. Correct the path and
+  retry the tool before you continue.
+- For one shell call in another directory, use the `shell_execute`
+  `WorkingDirectory` argument. Do not add an inline `cd` unless changing
+  directory is itself the behavior the user asked you to run or test.
 
 The project directory is distinct from the session directory
 (`~/.netclaw/sessions/{id}/`). The session directory is immutable and used for

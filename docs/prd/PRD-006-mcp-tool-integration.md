@@ -5,7 +5,7 @@
 - State: Draft for execution (revised)
 - Owner: Netclaw engineering
 - Date: 2026-02-21
-- Revised: 2026-02-21 (Memorizer as external memory tier, tool loading)
+- Revised: 2026-08-10 (MCP tool and prompt catalog notifications)
 - Depends on: `PRD-001`, `PRD-002`, `PRD-004`
 
 ## Goal
@@ -21,6 +21,8 @@ learning.
 2. MCP tools are available to Netclaw sessions only when policy allows.
 3. MCP connectivity and failures are visible in diagnostics.
 4. Memorizer provides durable cross-session knowledge that outlives compaction.
+5. MCP prompt workflows are discoverable through the existing skill system.
+6. Supported servers can publish tool and prompt catalog changes without a poll delay.
 
 ## Two-Tier Memory Architecture
 
@@ -96,17 +98,77 @@ Runtime SHALL degrade gracefully when MCP server is unavailable:
 
 ### MCP-009 Daemon-Bound Server Ownership
 
-Each configured MCP server SHALL have at most one live client connection per
-Netclaw daemon. A local STDIO server process and its internal state are shared
+Each configured MCP server SHALL have at most one published client generation
+per Netclaw daemon. A replacement MAY initialize while the published generation
+continues serving, but it SHALL remain unpublished until initialization
+succeeds, and the replaced generation SHALL not be disposed while it has
+in-flight calls. A local STDIO server process and its internal state are shared
 by all sessions authorized to use that server; Netclaw session identity SHALL
 not launch or select a separate MCP process.
+
+### MCP-010 Secure OAuth Lifecycle
+
+HTTP MCP OAuth SHALL delegate protocol operations to the MCP C# SDK while
+Netclaw owns local browser-flow brokering, credential persistence, and client
+lifecycle. Persisted tokens and dynamically registered client credentials SHALL
+be bound to the configured MCP resource identity and SHALL NOT be supplied after
+that identity changes or when a legacy record lacks a binding. Credential
+persistence failures, invalid callback state, and authorization failures SHALL
+fail visibly without deleting the last working credentials or connection.
+
+Concurrent authorization and reconnect attempts SHALL coalesce per server.
+Ambiguous transport failures SHALL NOT automatically replay a tool invocation,
+because the remote operation may already have completed.
+
+### MCP-011 Prompt Discovery and Skill Adaptation
+
+Netclaw SHALL discover prompt descriptors from each enabled server that
+declares prompt support. It SHALL publish tools and prompts in one immutable
+server generation.
+
+Each prompt SHALL enter the unified skill catalog as
+`mcp__<server>__<prompt>`. The agent SHALL render a selected prompt through
+`skill_load` and `prompts/get`.
+
+The existing MCP server grant SHALL control prompt discovery and use. A prompt
+SHALL NOT grant a tool or bypass a tool approval.
+
+`skill_load` SHALL validate required and unknown prompt arguments before the
+remote request. It SHALL preserve prompt roles and source attribution.
+
+A failed prompt discovery or refresh SHALL keep the last good generation.
+The existing catalog poll SHALL include prompt descriptors.
+
+### MCP-012 Tool and Prompt Catalog Notifications
+
+Netclaw SHALL listen for tool and prompt list changes on each published MCP
+client generation. For MCP revision 2026-07-28, it SHALL use one
+`subscriptions/listen` request and enable only the acknowledged event types.
+
+For older revisions, Netclaw SHALL accept direct list-change notifications only
+when the matching server capability declares `listChanged` support.
+
+A notification SHALL refresh the complete tool and prompt candidate before
+publication. A successful changed candidate SHALL publish one immutable
+generation. A failed refresh SHALL keep the last good generation.
+
+Repeated notifications SHALL create at most one active refresh and one queued
+follow-up refresh. A reconnect SHALL replace the prior notification lease.
+The existing poll SHALL remain the repair path for missed events and unsupported
+servers.
+
+Notification compatibility and failures SHALL appear in safe structured logs.
+This requirement does not add status API, CLI, or TUI fields.
 
 ## Non-Goals (MVP)
 
 - Dynamic marketplace discovery of MCP servers
 - Unmanaged auto-install of remote tool bundles
 - Multi-tenant tool permission partitioning
-- Hot-reload of MCP tool definitions (requires session reboot)
+- MCP resource discovery and read operations
+- MCP resource change notifications and subscriptions
+- MCP prompt completion API support
+- First-party client autocomplete for prompt skills
 
 ## Acceptance Criteria
 
@@ -119,6 +181,23 @@ not launch or select a separate MCP process.
 6. Unavailable MCP server does not crash the session.
 7. Calls from different authorized sessions to one local STDIO profile use the
    same daemon-owned client and child process.
+8. Repointing an MCP profile does not send credentials bound to its old resource
+   identity to the new endpoint.
+9. Legacy OAuth records without a resource binding fail closed and direct the
+   operator to reauthorize.
+10. OAuth token persistence failure is visible and does not advance caller-visible
+   credential state.
+11. A transport failure may reconnect the server for later calls but does not
+    replay the failed tool invocation automatically.
+12. A prompt-capable server contributes canonical MCP prompt skills to an
+    authorized session.
+13. `skill_load` renders an MCP prompt with validated arguments and source
+    attribution.
+14. A denied server contributes no prompt skills to that audience.
+15. A modern server notification refreshes tools and prompts without a poll delay.
+16. An older server with `listChanged` support refreshes through direct notifications.
+17. A missed or unsupported notification is repaired by the existing catalog poll.
+18. A failed notification refresh keeps the last good tool and prompt generation.
 
 ## Cross-References
 

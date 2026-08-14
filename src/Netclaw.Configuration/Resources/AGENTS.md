@@ -19,31 +19,24 @@
 
 ## Declaring Project Scope (load-bearing for approvals)
 
-Path arguments to shell commands declare scope implicitly. When you run
-`find /home/user/repo -name X`, the approval gate treats `/home/user/repo`
-as the directory portion of `(find, /home/user/repo)` automatically. You
-do NOT need to call `set_working_directory` first for that to work — the
-path argument IS the declaration. Folder-scoped trust compounds across
-deeper paths, so a future `find /home/user/repo/.netclaw` is auto-allowed.
+Path arguments give the approval gate an exact candidate scope. They do not
+add a safe-space root or make an uncovered command safe. A stored folder
+grant can cover deeper paths beneath its approved root.
 
-**When `set_working_directory` IS the right tool**, it's for sessions
-where the agent will run multiple commands without explicit path
-arguments — typical interactive REPL work, `git status` followed by
-`git diff` followed by edits, or `make build` and similar tools that
-hide their target behind flags (`make -C`, `git -C`). In those cases
-call `set_working_directory <path>` so the safe-verb short-circuit
-treats that tree as a safe space; the agent's read-only verbs auto-run
-with no prompt.
+Call `set_working_directory <path>` before the first shell command when all of
+these conditions apply:
 
-When the user task is scoped to a project or codebase the user named
-explicitly (a directory path, a repo, "this codebase"), declaring
-scope — either by passing the path on each command or by calling
-`set_working_directory` once — keeps the approval prompts from
-interrupting every read-only inspection. Skipping that produces a
-prompt per call, which burns the user's attention and your token
-budget while delivering zero security value: read-only inspection of
-the user's own codebase was never the threat the gate was built to
-stop.
+- The user or assigned task names a project or codebase.
+- `[working-context]` does not name that project as `project_dir`.
+- The work needs several shell calls in that project.
+- The `set_working_directory` tool is available.
+
+This rule also applies to subagents with that tool and to commands with
+absolute path operands. Typical cases include `git status` followed by
+`git diff`, build commands, or several read-only inspections. Do not repeat
+the call when `project_dir` already names the correct project. The declaration
+loads project instructions and gives reviewed-safe policy the intended
+safe-space root.
 
 When NOT to declare scope at all: pure-conversation turns ("what's
 2+2?", "explain X"), sessions where no project has been mentioned, or
@@ -51,11 +44,47 @@ one-shot lookups against external APIs. Calling
 `set_working_directory` preemptively without a project signal is its
 own kind of noise.
 
+For one shell call in a named directory, set the `shell_execute`
+`WorkingDirectory` argument. This argument does not change the persistent
+project root or create trust by itself. Do not prefix the command with an inline `cd`.
+Inline `cd` changes control flow. In `cd <path> && A; B`, command `B` can run
+after a failed `cd`, so approval analysis cannot use the requested directory.
+Keep inline `cd` only when changing directory is itself behavior that the user
+asked you to run or test.
+
 **Recovery from a denied shell call.** If `shell_execute` fails with a denial
 that mentions cwd being outside the safe spaces, the result includes a hint
 pointing at `set_working_directory <path>`. Read the hint, call the tool with
 the directory the user is asking about, then retry the original shell call —
 do not re-prompt the user.
+
+If `set_working_directory` rejects a path, correct the path and retry the tool.
+Do not continue with a stale directory or use an inline `cd` as a workaround.
+
+## Native Shell Syntax
+
+The `[working-context]` block names the exact shell executable, grammar, and
+PowerShell dialect available to `shell_execute`. Author commands in that
+grammar:
+
+- Linux and macOS use Bash, for example `rg -n "TODO" src | head -40`.
+- Windows uses native PowerShell, for example
+  `Get-ChildItem -Path src -Recurse | Select-String -Pattern TODO`.
+- On Windows, use `&&` and `||` only when the context names PowerShell 7.
+  Windows PowerShell 5.1 does not support those pipeline-chain operators; use
+  separate statements or ordinary PowerShell conditionals.
+
+Shell languages do not nest implicitly. A `pwsh -Command ...` call submitted
+to Bash is one external program invocation; Bash approval analysis does not
+reinterpret its payload as PowerShell. Likewise, native PowerShell treats
+`bash -c ...` as an external command. Prefer the native grammar shown in
+context instead of adding a child-shell wrapper.
+
+The shell identity describes only Netclaw's selected executable and parser
+contract. Do not assume a profile, module, alias outside the parser's catalog,
+inherited variable value, executable lookup result, or external script body.
+When a command depends on unknown ambient state or dynamic command identity,
+expect the approval gate to keep it one-time and fail closed.
 
 ## Grounding Rules
 
@@ -198,6 +227,9 @@ a whole new agent file. Do not duplicate the agent's built-in instructions.
 reload automatically on the next turn or subagent lookup. Invalid edits fail
 closed — the broken agent disappears until fixed. Spawned subagents inherit the
 parent session's `session_dir` and current `project_dir` as read-only grounding.
+Use `session_dir` as private scratch for disposable artifacts. Preserve an
+explicit platform temporary path when the task requires that path. Netclaw does
+not automatically clean session scratch yet.
 
 **Parallelization tip:** When researching multiple independent topics, spawn
 separate subagents for each — they run concurrently and reduce total wait time.

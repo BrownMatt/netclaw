@@ -1,4 +1,4 @@
-﻿// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
 // <copyright file="OperationalAlert.cs" company="Petabridge, LLC">
 //      Copyright (C) 2026 - 2026 Petabridge, LLC <https://petabridge.com>
 // </copyright>
@@ -37,6 +37,11 @@ public enum AlertType
     DaemonStopping,
     DaemonCrashed,
     UpdateAvailable,
+
+    // Appended at the end so any ordinal-based representation of prior values
+    // stays stable. A reminder could not compute or install its next occurrence
+    // at an unattended reschedule site (post-fire reschedule or startup reconcile).
+    ReminderScheduleFailed,
 }
 
 /// <summary>

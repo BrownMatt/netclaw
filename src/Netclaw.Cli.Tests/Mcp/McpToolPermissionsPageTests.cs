@@ -14,6 +14,7 @@ using Netclaw.Tools;
 using Termina;
 using Termina.Hosting;
 using Termina.Input;
+using Termina.Rendering;
 using Termina.Terminal;
 using Xunit;
 
@@ -61,6 +62,11 @@ public sealed class McpToolPermissionsPageTests : IDisposable
             $"Expected 'create-pages' in terminal. Screen:\n{terminal}");
         Assert.True(terminal.Contains("search"),
             $"Expected 'search' in terminal. Screen:\n{terminal}");
+        AssertLineHasBackground(terminal, "Server default", Color.Cyan);
+        AssertLineDoesNotHaveBackground(terminal, "Audience", Color.Cyan);
+        AssertLineDoesNotHaveBackground(terminal, "Server enabled", Color.Cyan);
+        AssertLineDoesNotHaveBackground(terminal, "create-pages", Color.Cyan);
+        AssertLineDoesNotHaveBackground(terminal, "search", Color.Cyan);
     }
 
     [Fact]
@@ -236,7 +242,29 @@ public sealed class McpToolPermissionsPageTests : IDisposable
     }
 
     [Fact]
+    public async Task ToolGrid_EnterThenEnter_SavesDefaultAndGoesBack()
+    {
+        var (_, app, vm) = CreateHeadlessApp(out var input);
+
+        vm.InitializeForTests(new McpServerName("notion"), ["create-pages"]);
+        vm.SetSelectedAudienceForTests(TrustAudience.Personal);
+
+        input.EnqueueKey(ConsoleKey.DownArrow);
+        input.EnqueueKey(ConsoleKey.Spacebar);
+        input.EnqueueKey(ConsoleKey.Enter);
+        input.EnqueueKey(ConsoleKey.Enter);
+        input.EnqueueKey(ConsoleKey.Q, false, false, true);
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await app.RunAsync(cts.Token);
+
+        Assert.False(vm.HasUnsavedChanges);
+        Assert.Equal(ToolPermissionsState.ServerList, vm.CurrentState.Value);
+    }
+
+    [Fact]
     public async Task ToolGrid_EnterThenN_DiscardsAndGoesBack()
+
     {
         var (_, app, vm) = CreateHeadlessApp(out var input);
 
@@ -328,6 +356,44 @@ public sealed class McpToolPermissionsPageTests : IDisposable
     }
 
     [Fact]
+    public async Task ToolGrid_RightArrowOnScrolledToolRow_PreservesScrollPosition()
+    {
+        var (terminal, app, vm) = CreateHeadlessApp(out var input, height: 18);
+
+        var tools = Enumerable.Range(1, 50)
+            .Select(i => $"tool-{i:00}")
+            .ToList();
+
+        vm.InitializeForTests(new McpServerName("notion"), tools);
+        vm.SetSelectedAudienceForTests(TrustAudience.Personal);
+
+        if (!vm.IsServerAllowedForSelectedAudience())
+            vm.ToggleServerAccess();
+
+        // Cursor starts at row 0. Move to row 38:
+        // row 0 = Audience, row 1 = Server enabled, row 2 = Server default,
+        // row 3 = tool-01, so row 38 = tool-36.
+        for (var i = 0; i < 38; i++)
+            input.EnqueueKey(ConsoleKey.DownArrow);
+
+        input.EnqueueKey(ConsoleKey.RightArrow);
+        input.EnqueueKey(ConsoleKey.Q, false, false, true);
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await app.RunAsync(cts.Token);
+
+        Assert.True(terminal.Contains("tool-36"),
+            $"Expected scrolled/focused row to remain visible after RightArrow. Screen:\n{terminal}");
+        Assert.False(terminal.Contains("tool-01"),
+            $"Expected scroll not to reset to the top after RightArrow. Screen:\n{terminal}");
+        AssertLineHasBackground(terminal, "tool-36", Color.Cyan);
+
+        var (mode, inherited) = vm.GetEffectiveMode(new ToolName("tool-36"));
+        Assert.Equal(ToolApprovalMode.Auto, mode);
+        Assert.False(inherited);
+    }
+
+    [Fact]
     public async Task Loading_Escape_QuitsInsteadOfStalling()
     {
         var (_, app, vm) = CreateHeadlessApp(out var input);
@@ -343,9 +409,9 @@ public sealed class McpToolPermissionsPageTests : IDisposable
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     private (VirtualTerminal Terminal, TerminaApplication App, McpToolPermissionsViewModel Vm)
-        CreateHeadlessApp(out VirtualInputSource input)
+        CreateHeadlessApp(out VirtualInputSource input, int width = 120, int height = 40)
     {
-        var terminal = new VirtualTerminal(120, 40);
+        var terminal = new VirtualTerminal(width, height);
         var virtualInput = new VirtualInputSource();
         input = virtualInput;
 
@@ -375,7 +441,36 @@ public sealed class McpToolPermissionsPageTests : IDisposable
         return (terminal, app, capturedVm!);
     }
 
+    private static void AssertLineHasBackground(VirtualTerminal terminal, string text, Color expected)
+    {
+        var row = FindLine(terminal, text);
+        var hasExpectedBackground = Enumerable.Range(0, terminal.Width)
+            .Any(column => terminal.GetBackground(column, row) == expected);
+
+        Assert.True(hasExpectedBackground,
+            $"Expected line containing '{text}' to include {expected} background. Screen:\n{terminal}");
+    }
+
+    private static void AssertLineDoesNotHaveBackground(VirtualTerminal terminal, string text, Color unexpected)
+    {
+        var row = FindLine(terminal, text);
+        var hasUnexpectedBackground = Enumerable.Range(0, terminal.Width)
+            .Any(column => terminal.GetBackground(column, row) == unexpected);
+
+        Assert.False(hasUnexpectedBackground,
+            $"Expected line containing '{text}' not to include {unexpected} background. Screen:\n{terminal}");
+    }
+
+    private static int FindLine(VirtualTerminal terminal, string text)
+    {
+        var lines = terminal.GetAllLines();
+        var row = Array.FindIndex(lines, line => line.Contains(text, StringComparison.Ordinal));
+        Assert.True(row >= 0, $"Expected line containing '{text}'. Screen:\n{terminal}");
+        return row;
+    }
+
     private sealed class FailingHttpHandler : HttpMessageHandler
+
     {
         protected override Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request, CancellationToken cancellationToken)

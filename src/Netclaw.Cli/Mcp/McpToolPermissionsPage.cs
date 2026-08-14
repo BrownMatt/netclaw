@@ -3,6 +3,7 @@
 //      Copyright (C) 2026 - 2026 Petabridge, LLC <https://petabridge.com>
 // </copyright>
 // -----------------------------------------------------------------------
+using Netclaw.Cli.Tui.Config;
 using Netclaw.Configuration;
 using Netclaw.Tools;
 using R3;
@@ -18,11 +19,17 @@ namespace Netclaw.Cli.Mcp;
 public sealed class McpToolPermissionsPage : ReactivePage<McpToolPermissionsViewModel>
 {
     private SelectionListNode<string>? _serverList;
-    private DynamicLayoutNode? _contentNode;
+    private KeyedDynamicLayoutNode<(ToolPermissionsState State, int Revision)>? _contentNode;
     private DynamicLayoutNode? _footerNode;
+    private DynamicLayoutNode? _gridHeaderRowsNode;
     private DynamicLayoutNode? _toolRowsNode;
     private ScrollableContainerNode? _toolScrollNode;
     private readonly CompositeDisposable _stepSubs = [];
+    private readonly TextNode _confirmSaveFooterNode = new TextNode(
+        "Save changes?  [Enter/Y] Save  [N] Discard  [Esc] Continue editing")
+        .WithForeground(Color.Yellow)
+        .Bold()
+        .NoWrap();
     private int _gridCursor;
     private bool _confirmingSave;
 
@@ -61,28 +68,54 @@ public sealed class McpToolPermissionsPage : ReactivePage<McpToolPermissionsView
 
     private LayoutNode BuildContent()
     {
-        _contentNode = new DynamicLayoutNode(() =>
-        {
-            _serverList = null;
-            _toolScrollNode = null;
-            _toolRowsNode = null;
-            _stepSubs.Clear();
-
-            return ViewModel.CurrentState.Value switch
+        _contentNode = new KeyedDynamicLayoutNode<(ToolPermissionsState State, int Revision)>(
+            GetContentKey,
+            _ =>
             {
-                ToolPermissionsState.Loading => BuildLoading(),
-                ToolPermissionsState.ServerList => BuildServerList(),
-                ToolPermissionsState.ToolGrid => BuildToolGrid(),
-                ToolPermissionsState.Saving => BuildLoading(),
-                _ => Layouts.Empty()
-            };
-        });
+                _serverList = null;
+                _toolScrollNode = null;
+                _gridHeaderRowsNode = null;
+                _toolRowsNode = null;
+                _stepSubs.Clear();
 
+                return ViewModel.CurrentState.Value switch
+                {
+                    ToolPermissionsState.Loading => BuildLoading(),
+                    ToolPermissionsState.ServerList => BuildServerList(),
+                    ToolPermissionsState.ToolGrid => BuildToolGrid(),
+                    ToolPermissionsState.Saving => BuildLoading(),
+                    _ => Layouts.Empty()
+                };
+            },
+            KeyedDynamicCachePolicy.EvictOnKeyChange);
+
+        // ToolGrid updates invalidate only the header and rows, so the scroll container persists and keeps its scroll position.
         ViewModel.StateVersion
-            .Subscribe(_ => _contentNode.Invalidate())
+            .Subscribe(_ =>
+            {
+                if (ViewModel.CurrentState.Value == ToolPermissionsState.ToolGrid
+                    && _toolRowsNode is not null)
+                {
+                    _gridHeaderRowsNode?.Invalidate();
+                    _toolRowsNode.Invalidate();
+                }
+                else
+                {
+                    _contentNode.Invalidate();
+                }
+            })
             .DisposeWith(Subscriptions);
 
         return _contentNode.Fill();
+    }
+
+    private (ToolPermissionsState State, int Revision) GetContentKey()
+    {
+        var state = ViewModel.CurrentState.Value;
+        var revision = state is ToolPermissionsState.Loading or ToolPermissionsState.Saving
+            ? ViewModel.StateVersion.Value
+            : 0;
+        return (state, revision);
     }
 
     private ILayoutNode BuildLoading()
@@ -127,10 +160,6 @@ public sealed class McpToolPermissionsPage : ReactivePage<McpToolPermissionsView
     private ILayoutNode BuildToolGrid()
     {
         var server = ViewModel.SelectedServer ?? "?";
-        var audienceLabel = ViewModel.SelectedAudience.ToWireValue();
-        var serverAllowed = ViewModel.IsServerAllowedForSelectedAudience();
-        var serverDefault = ViewModel.GetServerDefault();
-
         var maxRow = TotalRows - 1;
         if (_gridCursor > maxRow) _gridCursor = maxRow;
         if (_gridCursor < 0) _gridCursor = 0;
@@ -138,37 +167,12 @@ public sealed class McpToolPermissionsPage : ReactivePage<McpToolPermissionsView
         var layout = Layouts.Vertical()
             .WithChild(new TextNode($"  Server: {server}").WithForeground(Color.White).Bold());
 
-        // Row 0: Audience selector
-        var audPrefix = _gridCursor == AudienceRow ? " ▶ " : "   ";
-        var audText = $"{audPrefix}Audience: [◀ {audienceLabel,-8} ▶]";
-        var audNode = new TextNode(audText);
-        audNode = _gridCursor == AudienceRow
-            ? audNode.WithForeground(Color.Cyan).Bold()
-            : audNode.WithForeground(Color.White);
-        layout = layout.WithChild(audNode);
-
-        layout = layout.WithSpacing(1);
-
-        // Row 1: Server enabled
-        var enPrefix = _gridCursor == ServerEnabledRow ? " ▶ " : "   ";
-        var accessMarker = serverAllowed ? "✓" : " ";
-        var enText = $"{enPrefix}[{accessMarker}] Server enabled for {audienceLabel}";
-        var enNode = new TextNode(enText);
-        enNode = _gridCursor == ServerEnabledRow
-            ? enNode.WithForeground(Color.Cyan).Bold()
-            : enNode.WithForeground(serverAllowed ? Color.White : Color.Yellow);
-        layout = layout.WithChild(enNode);
-
-        // Row 2: Server default
-        var sdPrefix = _gridCursor == ServerDefaultRow ? " ▶ " : "   ";
-        var sdText = $"{sdPrefix}Server default: [{serverDefault}]";
-        var sdNode = new TextNode(sdText);
-        sdNode = _gridCursor == ServerDefaultRow
-            ? sdNode.WithForeground(Color.Cyan).Bold()
-            : sdNode.WithForeground(ColorForMode(serverDefault));
-        layout = layout.WithChild(sdNode);
-
-        layout = layout.WithSpacing(1);
+        // Header and tool rows are separate dynamic nodes so cursor movement can
+        // repaint both regions without recreating the scroll container.
+        _gridHeaderRowsNode = new DynamicLayoutNode(BuildGridHeaderRows);
+        layout = layout
+            .WithChild(_gridHeaderRowsNode)
+            .WithSpacing(1);
 
         // Tool rows live in a separate DynamicLayoutNode so cursor navigation
         // can invalidate just the rows without resetting the scroll container.
@@ -182,7 +186,33 @@ public sealed class McpToolPermissionsPage : ReactivePage<McpToolPermissionsView
         return layout;
     }
 
+    private ILayoutNode BuildGridHeaderRows()
+    {
+        var audienceLabel = ViewModel.SelectedAudience.ToWireValue();
+        var serverAllowed = ViewModel.IsServerAllowedForSelectedAudience();
+        var serverDefault = ViewModel.GetServerDefault();
+        var accessMarker = serverAllowed ? "\u2713" : " ";
+
+        return Layouts.Vertical()
+            .WithChild(ConfigSelectionRow.Create(
+                $"Audience: [\u25c0 {audienceLabel,-8} \u25b6]",
+                _gridCursor == AudienceRow,
+                bold: true))
+            .WithChild(ConfigSelectionRow.Create(
+                $"[{accessMarker}] Server enabled for {audienceLabel}",
+                _gridCursor == ServerEnabledRow,
+                serverAllowed ? Color.White : Color.Yellow,
+                bold: true))
+            .WithChild(ConfigSelectionRow.Create(
+                $"Server default: [{serverDefault}]",
+                _gridCursor == ServerDefaultRow,
+                ColorForMode(serverDefault),
+                bold: true))
+            .WithSpacing(1);
+    }
+
     private ILayoutNode BuildToolRows()
+
     {
         var tools = ViewModel.DiscoveredTools;
         var serverAllowed = ViewModel.IsServerAllowedForSelectedAudience();
@@ -196,24 +226,14 @@ public sealed class McpToolPermissionsPage : ReactivePage<McpToolPermissionsView
             var tool = tools[i];
             var toolName = new ToolName(tool);
             var granted = serverAllowed && ViewModel.IsToolGranted(toolName);
-            var prefix = isFocused ? " ▶ " : "   ";
-            var marker = granted ? "✓" : " ";
+            var marker = granted ? "\u2713" : " ";
             var paddedName = tool.PadRight(maxToolNameLen);
             var (effectiveMode, inherited) = ViewModel.GetEffectiveMode(toolName);
             var modeBadge = $"[{effectiveMode}]";
             var inheritSuffix = inherited ? "(def)" : "(override)";
-            var line = $"{prefix}[{marker}] {paddedName}  {modeBadge,-12} {inheritSuffix}";
-
-            var node = new TextNode(line);
-            if (!serverAllowed)
-                node = node.WithForeground(Color.BrightBlack);
-            else if (isFocused)
-                node = node.WithForeground(Color.Cyan).Bold();
-            else if (granted)
-                node = node.WithForeground(Color.White);
-            else
-                node = node.WithForeground(Color.BrightBlack);
-            rows = rows.WithChild(node);
+            var line = $"[{marker}] {paddedName}  {modeBadge,-12} {inheritSuffix}";
+            var foreground = serverAllowed && granted ? Color.White : Color.BrightBlack;
+            rows = rows.WithChild(ConfigSelectionRow.Create(line, isFocused, foreground, bold: isFocused));
         }
 
         return rows;
@@ -256,8 +276,7 @@ public sealed class McpToolPermissionsPage : ReactivePage<McpToolPermissionsView
         {
             if (_confirmingSave)
             {
-                return new TextNode("Save changes?  [Y] Yes  [N] No  [Esc] Cancel")
-                    .WithForeground(Color.Yellow).Bold().NoWrap();
+                return _confirmSaveFooterNode;
             }
 
             var hints = ViewModel.CurrentState.Value switch
@@ -289,6 +308,12 @@ public sealed class McpToolPermissionsPage : ReactivePage<McpToolPermissionsView
             .DisposeWith(Subscriptions);
 
         return _footerNode;
+    }
+
+    public override void Dispose()
+    {
+        base.Dispose();
+        _confirmSaveFooterNode.Dispose();
     }
 
     private static LayoutNode BuildToolGridFooterWithStatus(string hints, string status, Color color)
@@ -459,6 +484,7 @@ public sealed class McpToolPermissionsPage : ReactivePage<McpToolPermissionsView
     {
         switch (keyInfo.Key)
         {
+            case ConsoleKey.Enter:
             case ConsoleKey.Y:
                 _confirmingSave = false;
                 if (!ViewModel.Save())
@@ -493,6 +519,7 @@ public sealed class McpToolPermissionsPage : ReactivePage<McpToolPermissionsView
 
     private void InvalidateCursorAndRedraw()
     {
+        _gridHeaderRowsNode?.Invalidate();
         _toolRowsNode?.Invalidate();
         _footerNode?.Invalidate();
         ViewModel.RequestRedraw();

@@ -1,4 +1,4 @@
-﻿// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
 // <copyright file="DiscordIngressMessages.cs" company="Petabridge, LLC">
 //      Copyright (C) 2026 - 2026 Petabridge, LLC <https://petabridge.com>
 // </copyright>
@@ -92,8 +92,11 @@ internal sealed class PendingApprovalRequest
         RequesterSenderId = requesterSenderId;
         RequesterPrincipal = requesterPrincipal;
         OptionKeys = [.. optionKeys];
+        var isMcpTool = !string.IsNullOrEmpty(toolName) && new ToolName(toolName).IsMcp;
         Options = OptionKeys
-            .Select(key => new ToolInteractionOption(new ApprovalOptionKey(key), ApprovalOptionKeys.LabelFor(key)))
+            .Select(key => new ToolInteractionOption(
+                new ApprovalOptionKey(key),
+                ApprovalOptionKeys.LabelFor(key, isMcpTool)))
             .ToArray();
         PromptMessageId = promptMessageId;
         ToolName = toolName;

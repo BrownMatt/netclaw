@@ -1,8 +1,9 @@
-﻿// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
 // <copyright file="ModelCommand.cs" company="Petabridge, LLC">
 //      Copyright (C) 2026 - 2026 Petabridge, LLC <https://petabridge.com>
 // </copyright>
 // -----------------------------------------------------------------------
+using System.Globalization;
 using System.Text.Json;
 using Microsoft.Extensions.Configuration;
 using Netclaw.Cli.Config;
@@ -25,25 +26,31 @@ internal static class ModelCommand
         var writer = output ?? Console.Out;
         var subcommand = args.Length > 1 ? args[1] : "help";
 
-        return subcommand switch
+        try
         {
-            "list" => RunList(paths, writer),
-            "set" => await RunSetAsync(args, paths, probe, writer),
-            "discover" => await RunDiscoverAsync(args, paths, probe, writer),
-            "clear" => RunClear(args, paths, writer),
-            "help" or "-h" or "--help" => WriteHelp(writer),
-            _ => WriteHelp(writer)
-        };
+            return subcommand switch
+            {
+                "list" => RunList(paths, writer),
+                "set" => await RunSetAsync(args, paths, probe, writer),
+                "discover" => await RunDiscoverAsync(args, paths, probe, writer),
+                "clear" => RunClear(args, paths, writer),
+                "help" or "-h" or "--help" => WriteHelp(writer),
+                _ => WriteHelp(writer)
+            };
+        }
+        catch (ModelConfigurationException ex)
+        {
+            writer.WriteLine($"Error: {ex.Message}");
+            return 1;
+        }
     }
 
     private static int RunList(NetclawPaths paths, TextWriter writer)
     {
-        if (!TryLoadModelSelection(paths, out var models))
+        if (!TryLoadModelSelection(paths, out var models, out var error))
         {
-            // Config present but unparseable — surface it rather than showing a corrupt config as
-            // "no models configured", which would send the operator down the wrong recovery path.
-            writer.WriteLine("Error: model configuration could not be parsed.");
-            writer.WriteLine("Run `netclaw doctor` to diagnose, or `netclaw doctor --fix` to repair it.");
+            writer.WriteLine($"Error: {error}");
+            writer.WriteLine("Fix the Models section in netclaw.json, then rerun `netclaw model list`.");
             return 1;
         }
 
@@ -228,17 +235,10 @@ internal static class ModelCommand
             }
         }
 
-        // Only an explicit --context-window short-circuits the probe: it supplies the one datum the
-        // probe would discover, so it is the documented "configure this model manually" escape
-        // hatch. A modality override must NOT skip the probe — the probe also validates the model
-        // exists and discovers the context window, and WriteRole already lets an explicit modality
-        // override win over any discovered value, so it is safe to keep probing. --clear-context-window
-        // likewise keeps the probe: "re-detect" is exactly what the probe does.
-        var manualMetadataSupplied = contextWindow.HasValue;
-
-        DiscoveredModel? discoveredModel = null;
+        // An explicit context window permits a manual model ID.
+        // All other OAuth selections require validation against the live model list.
         var provenance = ModelDiscoverySource.Manual;
-        if (!manualMetadataSupplied && ShouldProbeForMetadata(providerEntry))
+        if (!contextWindow.HasValue && ShouldProbeForMetadata(providerEntry))
         {
             probe ??= ProviderCommand.CreateDefaultRegistry();
             ProviderProbeResult probeResult;
@@ -251,7 +251,7 @@ internal static class ModelCommand
                 return 1;
             }
 
-            discoveredModel = probeResult.Models.FirstOrDefault(m =>
+            var discoveredModel = probeResult.Models.FirstOrDefault(m =>
                 string.Equals(m.ModelId.Value, modelId, StringComparison.OrdinalIgnoreCase));
             if (discoveredModel is null)
             {
@@ -267,9 +267,8 @@ internal static class ModelCommand
         var (config, _) = ConfigFileHelper.LoadConfigFiles(paths);
         var modelsSection = ConfigFileHelper.GetOrCreateSection(config, "Models");
 
-        // Definitions own model metadata, so role switches never destroy another model's
-        // operator-owned overrides. Discovery seeds only a new definition; explicit input edits
-        // an existing definition and absence remains runtime detection (#1127, #1610).
+        // Definitions own model metadata. Role switches preserve another model's overrides.
+        // Only explicit operator input persists capability overrides (#1756).
         ModelEntryWriter.WriteRole(
             modelsSection,
             roleKey,
@@ -278,8 +277,7 @@ internal static class ModelCommand
             provenance,
             contextWindowOverride,
             inputOverride,
-            outputOverride,
-            discoveredModel);
+            outputOverride);
         ConfigFileHelper.WriteConfigFile(paths.NetclawConfigPath, config);
 
         writer.WriteLine($"Set {role} model to {providerName}/{modelId}");
@@ -306,11 +304,11 @@ internal static class ModelCommand
         var result = ModelModality.None;
         foreach (var token in value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
         {
-            // Enum.TryParse also accepts the underlying integer ("3" → Text|Image), but the contract
-            // advertised in the help text and error message is named flags only. Enum.IsDefined
-            // rejects a numeric token because its parsed value is not a single declared member, so a
-            // mistyped or scripted number is not silently coerced into a modality set.
-            if (!Enum.TryParse(token, ignoreCase: true, out ModelModality parsed)
+            // Enum.TryParse accepts underlying integers, including values that happen to be declared
+            // members ("1" → Text). The CLI contract is named flags only, so reject numeric tokens
+            // before parsing rather than relying on Enum.IsDefined to distinguish composites.
+            if (int.TryParse(token, NumberStyles.Integer, CultureInfo.InvariantCulture, out _)
+                || !Enum.TryParse(token, ignoreCase: true, out ModelModality parsed)
                 || !Enum.IsDefined(parsed)
                 || parsed == ModelModality.None)
                 return false;
@@ -498,7 +496,7 @@ internal static class ModelCommand
     /// <see cref="TryLoadModelSelection"/>.
     /// </summary>
     internal static ModelSelection? LoadModelSelection(NetclawPaths paths)
-        => TryLoadModelSelection(paths, out var models) ? models : null;
+        => TryLoadModelSelection(paths, out var models, out _) ? models : null;
 
     /// <summary>
     /// Attempts to load the model selection. Returns false when the config file is present but its
@@ -506,9 +504,13 @@ internal static class ModelCommand
     /// treating it as "no models". Returns true (with null <paramref name="models"/>) when no config
     /// file or Models section exists.
     /// </summary>
-    internal static bool TryLoadModelSelection(NetclawPaths paths, out ModelSelection? models)
+    internal static bool TryLoadModelSelection(
+        NetclawPaths paths,
+        out ModelSelection? models,
+        out string? error)
     {
         models = null;
+        error = null;
         if (!File.Exists(paths.NetclawConfigPath))
             return true;
 
@@ -523,8 +525,14 @@ internal static class ModelCommand
             models = ModelConfigurationResolver.Resolve(configuration).Selection;
             return true;
         }
+        catch (ModelConfigurationException ex)
+        {
+            error = ex.Message;
+            return false;
+        }
         catch (Exception ex) when (ex is JsonException or InvalidOperationException)
         {
+            error = "model configuration could not be parsed.";
             return false;
         }
     }

@@ -1,4 +1,4 @@
-﻿// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
 // <copyright file="ChatPage.cs" company="Petabridge, LLC">
 //      Copyright (C) 2026 - 2026 Petabridge, LLC <https://petabridge.com>
 // </copyright>
@@ -298,17 +298,32 @@ public sealed class ChatPage : ReactivePage<ChatViewModel>
             return;
         }
 
-        // Escape: cancel or quit
+        // Escape is a cancel key everywhere — never quits. With an approval
+        // prompt up it denies the pending interaction (#1757); while
+        // generating it shows a status message (cancel not supported yet);
+        // idle it's a no-op. Ctrl+Q is the only quit affordance.
         if (keyInfo.Key == ConsoleKey.Escape)
         {
-            if (ViewModel.IsGenerating.Value)
+            // A pending approval prompt always takes precedence. IsGenerating
+            // is cleared when a ToolInteractionRequest arrives, but the UI
+            // thread can observe a stale value, so the prompt check must come
+            // first — otherwise Escape gets swallowed by the generation-cancel
+            // TODO branch and the user has to press it again.
+            if (ViewModel.HasPendingInteraction)
             {
-                // TODO: cancel generation when supported
+                // Fire-and-forget is safe: SubmitInteractionSelectionAsync
+                // catches daemon exceptions internally and re-presents the
+                // prompt (or shows a reconnect status) on failure.
+                _ = ViewModel.DenyPendingInteractionAsync();
             }
-            else
+            else if (ViewModel.IsGenerating.Value)
             {
-                ViewModel.RequestAppShutdown();
+                // TODO: cancel generation when supported (#1757 follow-up).
+                // For now, tell the user instead of silently eating the key.
+                ViewModel.StatusMessage.Value = "Cancel generation is not supported yet.";
+                ViewModel.RequestRedraw();
             }
+            // else: idle — no-op. The status bar advertises [Ctrl+Q] Quit.
 
             return;
         }
@@ -462,9 +477,17 @@ public sealed class ChatPage : ReactivePage<ChatViewModel>
 
             case ToolInteractionRequest msg:
                 RemoveThinkingSpinner();
-                _chatHistory.AppendLine($"System: Approval required for {msg.ToolName}", Color.Yellow);
-                _chatHistory.AppendLine($"  {msg.DisplayText}", Color.White);
-                if (msg.Patterns.Count > 0)
+                _chatHistory.AppendLine(
+                    msg.ToolName.IsMcp
+                        ? "System: MCP tool approval required"
+                        : $"System: Approval required for {msg.ToolName}",
+                    Color.Yellow);
+                if (msg.ToolName.IsMcp)
+                    _chatHistory.AppendLine($"  Tool: {msg.ToolName}", Color.BrightBlack);
+                _chatHistory.AppendLine(
+                    msg.ToolName.IsMcp ? $"  Invocation: {msg.DisplayText}" : $"  {msg.DisplayText}",
+                    Color.White);
+                if (!msg.ToolName.IsMcp && msg.Patterns.Count > 0)
                     _chatHistory.AppendLine($"  Patterns: {string.Join(", ", msg.Patterns)}", Color.BrightBlack);
                 _chatHistory.AppendLine($"  Options: {string.Join(", ", msg.Options.Select(o => o.Label))}", Color.Yellow);
                 _chatHistory.ScrollToBottom();
