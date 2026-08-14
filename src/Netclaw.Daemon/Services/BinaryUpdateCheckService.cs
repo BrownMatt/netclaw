@@ -104,9 +104,13 @@ internal sealed class BinaryUpdateCheckService : BackgroundService
                 _logger.LogInformation("Netclaw is up to date (v{Version})", _currentVersion);
             }
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        // An unhandled exception here stops the whole daemon host
+        // (BackgroundService default behavior is StopHost). Only a real shutdown
+        // cancellation may propagate. An HttpClient timeout is also an
+        // OperationCanceledException, so the filter must test the token.
+        catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
-            _logger.LogDebug(ex, "Binary update check failed — continuing normally");
+            _logger.LogWarning(ex, "Binary update check failed — continuing normally");
         }
     }
 

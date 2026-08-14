@@ -111,13 +111,46 @@ public sealed class BinaryUpdateCheckServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task CheckAndNotify_HandlesTimeoutGracefully()
+    public async Task CheckAndNotify_HandlesMissingManifestGracefully()
     {
         var handler = new FakeHttpMessageHandler();
         // No response configured → 404, which triggers HttpRequestException
 
         var sut = CreateDaemonService(handler, currentVersion: "0.1.0");
         await sut.CheckAndNotifyAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task CheckAndNotify_SurvivesFeedTimeout()
+    {
+        // Regression: a stalled manifest fetch hits the feed HTTP timeout, which
+        // surfaces as a TaskCanceledException while the daemon's stopping token
+        // is NOT canceled. This once escaped the catch filter and stopped the
+        // whole daemon host. The check must complete and record a failed result.
+        var handler = new FakeHttpMessageHandler(
+            _ => throw new TaskCanceledException("simulated feed timeout"));
+
+        var sut = CreateDaemonService(handler, currentVersion: "0.1.0");
+        await sut.CheckAndNotifyAsync(CancellationToken.None);
+
+        var cached = UpdateCheckService.GetLastResult();
+        Assert.NotNull(cached);
+        Assert.False(cached!.CheckSucceeded);
+        Assert.False(cached.IsUpdateAvailable);
+    }
+
+    [Fact]
+    public async Task CheckAndNotify_PropagatesShutdownCancellation()
+    {
+        // The BackgroundService contract expects real shutdown cancellation to
+        // propagate out of ExecuteAsync. Only internal timeouts are swallowed.
+        var handler = new FakeHttpMessageHandler();
+        var sut = CreateDaemonService(handler, currentVersion: "0.1.0");
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => sut.CheckAndNotifyAsync(cts.Token));
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -208,6 +241,33 @@ public sealed class BinaryUpdateCheckServiceTests : IDisposable
 
         // Signature failure treated as network failure → no update
         Assert.False(result.IsUpdateAvailable);
+    }
+
+    [Fact]
+    public async Task FetchVerifiedManifestAsync_ReturnsNetworkFailureOnTimeout()
+    {
+        var handler = new FakeHttpMessageHandler(
+            _ => throw new TaskCanceledException("simulated feed timeout"));
+
+        using var httpClient = new HttpClient(handler);
+        var result = await UpdateCheckService.FetchVerifiedManifestAsync(
+            httpClient, TestContext.Current.CancellationToken);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(ManifestFetchStatus.NetworkFailure, result.Status);
+        Assert.Contains("timed out", result.ErrorMessage);
+    }
+
+    [Fact]
+    public async Task FetchVerifiedManifestAsync_PropagatesCallerCancellation()
+    {
+        var handler = new FakeHttpMessageHandler();
+        using var httpClient = new HttpClient(handler);
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => UpdateCheckService.FetchVerifiedManifestAsync(httpClient, cts.Token));
     }
 
     [Fact]

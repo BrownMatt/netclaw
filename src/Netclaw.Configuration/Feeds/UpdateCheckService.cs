@@ -113,7 +113,9 @@ public static class UpdateCheckService
             RecordResult(result);
             return result;
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        // Keep the "never throws" contract for internal timeouts. Only a
+        // cancellation from the caller's token may propagate.
+        catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
             var failed = new UpdateCheckResult
             {
@@ -153,12 +155,18 @@ public static class UpdateCheckService
             response.EnsureSuccessStatusCode();
             manifestBytes = await response.Content.ReadAsByteArrayAsync(cts.Token);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        // The internal feed timeout (cts.CancelAfter above, and HttpClient.Timeout)
+        // surfaces as an OperationCanceledException with the caller's token NOT
+        // canceled. That is a network failure, not a cancellation — catch it here.
+        // Only a cancellation that came from the caller's token may propagate.
+        catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
             return new ManifestFetchResult
             {
                 Status = ManifestFetchStatus.NetworkFailure,
-                ErrorMessage = $"Failed to fetch manifest: {ex.Message}",
+                ErrorMessage = ex is OperationCanceledException
+                    ? $"Failed to fetch manifest: timed out after {FeedConstants.BinaryFeedHttpTimeout.TotalSeconds:0}s"
+                    : $"Failed to fetch manifest: {ex.Message}",
             };
         }
 
@@ -170,12 +178,15 @@ public static class UpdateCheckService
             sigResponse.EnsureSuccessStatusCode();
             signatureContent = await sigResponse.Content.ReadAsStringAsync(cts.Token);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        // Same timeout-vs-cancellation distinction as the manifest fetch above.
+        catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
             return new ManifestFetchResult
             {
                 Status = ManifestFetchStatus.SignatureFailure,
-                ErrorMessage = $"Failed to fetch manifest signature: {ex.Message}",
+                ErrorMessage = ex is OperationCanceledException
+                    ? $"Failed to fetch manifest signature: timed out after {FeedConstants.BinaryFeedHttpTimeout.TotalSeconds:0}s"
+                    : $"Failed to fetch manifest signature: {ex.Message}",
             };
         }
 
