@@ -14,6 +14,15 @@ explicitly changes priority.
 - Fixed-length approval button labels and richer approval UI.
 - Config hot-reload beyond startup-time configuration.
 - Operator diagnostics refinements beyond current CLI/doctor/status work.
+- Recurring reminders can disable themselves. `ReminderExecutionActor.BuildPrompt` tells every
+  `Interval`/`Cron` reminder it may call `cancel_reminder`, and the `Personal` audience exposes
+  that tool, so a weak model can disable a monitor reminder after a normal run (verified
+  2026-08-18: `network-daily-pull` self-disabled; verdicts stopped for two days). Fix options:
+  (1) suppress the auto-cancel guidance for `delivery_kind=none` monitor reminders, or make
+  self-cancel opt-in per reminder; (2) add a per-reminder tool allowlist so a reminder can run
+  with only `file_read` + `file_write`. Workaround already live on Nooch: `cancel_reminder:
+  Approval` in the `Personal` audience profile fail-closes autonomous callers (Approval-mode
+  tools deny for non-interactive reminder sessions).
 
 ## LATER Candidates
 
