@@ -36,8 +36,12 @@ internal sealed record ToolCallResult(
     IReadOnlyList<FileAttachmentInfo> FileAttachments,
     IReadOnlyList<CompletedSubAgentRun> CompletedSubAgentRuns,
     IReadOnlyList<AcceptedSubAgentFinding> AcceptedSubAgentFindings,
+    AuthorizationAttemptId AuthorizationAttemptId,
     Jobs.ActiveJobInfo? StartedBackgroundJob = null,
-    SessionScratchCorrectionChange? ScratchCorrectionChange = null);
+    SessionScratchCorrectionChange? ScratchCorrectionChange = null,
+    string? FailureCode = null,
+    ToolInvocationReceipt? Receipt = null,
+    ToolExposureRequest? ExposureRequest = null);
 
 internal abstract record SessionScratchCorrectionChange
 {
@@ -212,11 +216,15 @@ internal sealed class SessionToolBatch
         = new Dictionary<string, ApprovalDecision>().ToFrozenDictionary();
     private static readonly IReadOnlyDictionary<string, string> NoSessionScratchDenialDirectories
         = new Dictionary<string, string>().ToFrozenDictionary();
+    private static readonly IReadOnlyDictionary<string, AuthorizationAttemptId> NoAuthorizationAttemptIds
+        = new Dictionary<string, AuthorizationAttemptId>().ToFrozenDictionary();
     private IReadOnlyList<FunctionCallContent> _toolCalls = [];
     private IReadOnlyDictionary<string, IReadOnlyList<string>> _oneTimeApprovalPreSeed = NoApprovalPreSeed;
     private IReadOnlyDictionary<string, ApprovalDecision> _decisionOverrides = NoDecisionOverrides;
     private IReadOnlyDictionary<string, string> _sessionScratchDenialDirectories =
         NoSessionScratchDenialDirectories;
+    private IReadOnlyDictionary<string, AuthorizationAttemptId> _authorizationAttemptIds =
+        NoAuthorizationAttemptIds;
 
     public SessionToolBatch(TurnContext turnContext, SessionToolRunEnvironment environment)
     {
@@ -295,6 +303,15 @@ internal sealed class SessionToolBatch
             _sessionScratchDenialDirectories = value.ToFrozenDictionary(StringComparer.Ordinal);
         }
     }
+    public IReadOnlyDictionary<string, AuthorizationAttemptId> AuthorizationAttemptIds
+    {
+        get => _authorizationAttemptIds;
+        init
+        {
+            ArgumentNullException.ThrowIfNull(value);
+            _authorizationAttemptIds = value.ToFrozenDictionary(StringComparer.Ordinal);
+        }
+    }
     public CancellationToken CancellationToken { get; init; }
 
     public SessionId SessionId => TurnContext.SessionId;
@@ -315,6 +332,7 @@ internal sealed class SessionToolBatch
         ArgumentNullException.ThrowIfNull(OneTimeApprovalPreSeed);
         ArgumentNullException.ThrowIfNull(DecisionOverrides);
         ArgumentNullException.ThrowIfNull(SessionScratchDenialDirectories);
+        ArgumentNullException.ThrowIfNull(AuthorizationAttemptIds);
     }
 }
 
@@ -370,11 +388,32 @@ internal sealed class SessionToolExecutionPipeline
                         ? scratchDirectory
                         : null,
                     modelInputBudget);
+                result = result with
+                {
+                    Message = ToolRemediationPresenter.Present(
+                        result.Message,
+                        result.Receipt,
+                        batch.SetWorkingDirectoryAvailable)
+                };
                 if (batch.StreamResults)
                     batch.ReplyTo.Tell(new ToolExecutionSingleCompleted(result));
                 return result;
             });
             var results = await Task.WhenAll(tasks);
+            foreach (var result in results)
+            {
+                var callId = result.Message.ToolCallId?.Value
+                    ?? throw new InvalidOperationException("An authorization attempt requires a call identity.");
+                if (result.Receipt is { } receipt)
+                    _logger.Info(
+                        "Tool authorization attempt completed authorizationAttemptId={AuthorizationAttemptId} " +
+                        "sessionId={SessionId} callId={CallId} outcomeCategory={OutcomeCategory} remediationCode={RemediationCode}",
+                        result.AuthorizationAttemptId.Value,
+                        batch.SessionId.Value,
+                        callId,
+                        receipt.Category,
+                        receipt.RemediationCode?.ToString());
+            }
 
             if (batch.StreamResults)
             {
@@ -392,7 +431,40 @@ internal sealed class SessionToolExecutionPipeline
                 CompletedSubAgentRuns = [.. results.SelectMany(r => r.CompletedSubAgentRuns)],
                 AcceptedSubAgentFindings = [.. results.SelectMany(r => r.AcceptedSubAgentFindings)],
                 StartedBackgroundJobs = [.. results.Where(r => r.StartedBackgroundJob is not null).Select(r => r.StartedBackgroundJob!)],
-                ScratchCorrectionChanges = [.. results.Where(r => r.ScratchCorrectionChange is not null).Select(r => r.ScratchCorrectionChange!)]
+                ScratchCorrectionChanges = [.. results.Where(r => r.ScratchCorrectionChange is not null).Select(r => r.ScratchCorrectionChange!)],
+                ToolFailureCodes = results
+                    .Where(result => result.FailureCode is not null)
+                    .ToDictionary<ToolCallResult, string, string>(
+                        result => result.Message.ToolCallId is { } callId
+                            ? callId.Value
+                            : throw new InvalidOperationException("A failed tool result requires a call identity."),
+                        result => result.FailureCode
+                            ?? throw new InvalidOperationException("A failed tool result requires a failure code."),
+                        StringComparer.Ordinal),
+                ToolReceipts = results
+                    .Where(result => result.Receipt is not null)
+                    .ToDictionary<ToolCallResult, string, ToolInvocationReceipt>(
+                        result => result.Message.ToolCallId is { } callId
+                            ? callId.Value
+                            : throw new InvalidOperationException("A tool receipt requires a call identity."),
+                        result => result.Receipt
+                            ?? throw new InvalidOperationException("A selected tool result requires a receipt."),
+                        StringComparer.Ordinal),
+                ToolExposureRequests = results
+                    .Where(result => result.ExposureRequest is not null)
+                    .ToDictionary<ToolCallResult, string, ToolExposureRequest>(
+                        result => result.Message.ToolCallId is { } callId
+                            ? callId.Value
+                            : throw new InvalidOperationException("A tool exposure request requires a call identity."),
+                        result => result.ExposureRequest
+                            ?? throw new InvalidOperationException("A selected tool result requires an exposure request."),
+                        StringComparer.Ordinal),
+                AuthorizationAttemptIds = results.ToDictionary<ToolCallResult, string, AuthorizationAttemptId>(
+                    result => result.Message.ToolCallId is { } callId
+                        ? callId.Value
+                        : throw new InvalidOperationException("An authorization attempt requires a call identity."),
+                    result => result.AuthorizationAttemptId,
+                    StringComparer.Ordinal)
             });
         }
         catch (TimeoutException ex)
@@ -425,6 +497,19 @@ internal sealed class SessionToolExecutionPipeline
         string? sessionScratchDenialDirectory,
         ModelInputBatchBudget modelInputBudget)
     {
+        var originalToolCall = tc;
+        var authorizationAttemptId = batch.AuthorizationAttemptIds.TryGetValue(tc.CallId, out var restoredAttemptId)
+            ? restoredAttemptId
+            : AuthorizationAttemptId.New();
+
+        _logger.Info(
+            "Tool authorization attempt started authorizationAttemptId={AuthorizationAttemptId} " +
+            "sessionId={SessionId} callId={CallId} toolName={ToolName}",
+            authorizationAttemptId.Value,
+            batch.SessionId.Value,
+            tc.CallId,
+            tc.Name);
+
         // Single execution-preflight seam, shared with the sub-agent path via
         // IToolExecutor.InterpretToolCall: validate the ORIGINAL arguments (parse
         // sentinel, invalid/ambiguous meta values, unrecognized keys) and, on
@@ -438,7 +523,8 @@ internal sealed class SessionToolExecutionPipeline
                 Content = rejection.Message,
                 ToolCallId = new ToolCallId(tc.CallId),
                 Name = tc.Name
-            }, [], [], [], []);
+            }, [], [], [], [], authorizationAttemptId, FailureCode: rejection.DenyReason,
+                Receipt: new ToolInvocationReceipt(ToolInvocationOutcomeCategory.InvalidInput));
         }
 
         var meta = interpretation.Meta;
@@ -548,6 +634,7 @@ internal sealed class SessionToolExecutionPipeline
             callScope,
             new ToolExecutionTimeout(timeout),
             outputs);
+        context.Approval.RestoreAuthorizationAttemptId(authorizationAttemptId);
         var scratchShell = _executor is ISessionScratchRetryAwareExecutor scratchAwareExecutor
             ? scratchAwareExecutor.Shell
             : ApprovalShell.Bash;
@@ -605,6 +692,8 @@ internal sealed class SessionToolExecutionPipeline
                     [],
                     [],
                     [],
+                    authorizationAttemptId,
+                    Receipt: new ToolInvocationReceipt(ToolInvocationOutcomeCategory.AccessDenied),
                     ScratchCorrectionChange: consumedScratchKey is { } deniedConsumed
                         ? new SessionScratchCorrectionChange.Consume(deniedConsumed)
                         : null);
@@ -648,9 +737,29 @@ internal sealed class SessionToolExecutionPipeline
             }
 
             resultText = await ExecuteToolAttemptAsync(
-                _executor, tc, context, timeout, _timeProvider, batch.CancellationToken);
+                _executor, originalToolCall, context, timeout, _timeProvider, batch.CancellationToken);
             sw.Stop();
 
+        }
+        catch (ToolAgentCorrectionRequiredException correctionEx)
+        {
+            if (correctionEx.Correction is not ToolAgentCorrection.NativeToolSuggested nativeTool)
+                throw;
+
+            sw.Stop();
+            var correctionReceipt = new ToolInvocationReceipt(
+                ToolInvocationOutcomeCategory.RecoverableCorrection,
+                remediationCode: ToolRemediationCode.UseNativeTool);
+            return new ToolCallResult(new SerializableChatMessage
+            {
+                Role = Protocol.ChatRole.Tool,
+                Content = BuildNativeToolCorrection(nativeTool.ToolName),
+                ToolCallId = new ToolCallId(tc.CallId),
+                Name = tc.Name
+            }, [], context.Outputs.FileAttachments, completedRuns, acceptedFindings,
+                authorizationAttemptId,
+                Receipt: correctionReceipt,
+                ExposureRequest: new ToolExposureRequest(nativeTool.ToolName));
         }
         catch (ToolApprovalRequiredException approvalEx)
         {
@@ -664,6 +773,9 @@ internal sealed class SessionToolExecutionPipeline
                     correctedCall,
                     scratchCorrection.TemporaryRoot,
                     scratchCorrection.SessionDirectory);
+                var correctionReceipt = new ToolInvocationReceipt(
+                    ToolInvocationOutcomeCategory.RecoverableCorrection,
+                    remediationCode: ToolRemediationCode.UseSessionScratch);
 
                 return new ToolCallResult(new SerializableChatMessage
                 {
@@ -672,6 +784,8 @@ internal sealed class SessionToolExecutionPipeline
                     ToolCallId = new ToolCallId(tc.CallId),
                     Name = tc.Name
                 }, [], context.Outputs.FileAttachments, completedRuns, acceptedFindings,
+                    authorizationAttemptId,
+                    Receipt: correctionReceipt,
                     ScratchCorrectionChange: new SessionScratchCorrectionChange.Arm(newCorrectionKey));
             }
 
@@ -685,13 +799,18 @@ internal sealed class SessionToolExecutionPipeline
                 sw.Stop();
                 resultText = projectScopeCorrection;
 
+                var correctionReceipt = new ToolInvocationReceipt(
+                    ToolInvocationOutcomeCategory.RecoverableCorrection,
+                    remediationCode: ToolRemediationCode.SetWorkingDirectory);
                 return new ToolCallResult(new SerializableChatMessage
                 {
                     Role = Protocol.ChatRole.Tool,
                     Content = resultText,
                     ToolCallId = new ToolCallId(tc.CallId),
                     Name = tc.Name
-                }, [], context.Outputs.FileAttachments, completedRuns, acceptedFindings);
+                }, [], context.Outputs.FileAttachments, completedRuns, acceptedFindings,
+                    authorizationAttemptId,
+                    Receipt: correctionReceipt);
             }
 
             if (!CanRequestInteractiveApproval(batch.TurnContext))
@@ -705,7 +824,9 @@ internal sealed class SessionToolExecutionPipeline
                     Content = resultText,
                     ToolCallId = new ToolCallId(tc.CallId),
                     Name = tc.Name
-                }, [], context.Outputs.FileAttachments, completedRuns, acceptedFindings);
+                }, [], context.Outputs.FileAttachments, completedRuns, acceptedFindings,
+                    authorizationAttemptId,
+                    Receipt: new ToolInvocationReceipt(ToolInvocationOutcomeCategory.AccessDenied));
             }
 
             // Mid-turn approval pause: emit request to channel, block on TCS
@@ -733,6 +854,7 @@ internal sealed class SessionToolExecutionPipeline
                 Candidates = ctx.Candidates ?? [],
                 Cwd = ctx.Cwd,
                 IsMessy = ctx.IsMessy,
+                AuthorizationAttemptId = authorizationAttemptId.Value,
                 Options = ctx.Options
                     .Select(o => new ToolInteractionOption(o.Key, o.Label))
                     .ToList()
@@ -744,6 +866,14 @@ internal sealed class SessionToolExecutionPipeline
             });
 
             var decision = await waitTask;
+
+            _logger.Info(
+                "Tool authorization attempt retry decision authorizationAttemptId={AuthorizationAttemptId} " +
+                "sessionId={SessionId} callId={CallId} decision={Decision}",
+                authorizationAttemptId.Value,
+                batch.SessionId.Value,
+                tc.CallId,
+                decision);
 
             sw.Stop();
 
@@ -788,7 +918,7 @@ internal sealed class SessionToolExecutionPipeline
                 }
 
                 resultText = await ExecuteToolAttemptAsync(
-                    _executor, tc, context, timeout, _timeProvider, batch.CancellationToken);
+                    _executor, originalToolCall, context, timeout, _timeProvider, batch.CancellationToken);
                 sw.Stop();
 
             }
@@ -815,6 +945,7 @@ internal sealed class SessionToolExecutionPipeline
                     invocation: context.Invocation,
                     canDeclare: batch.CanDeclareWorkingDirectory);
                 resultText = string.IsNullOrEmpty(hint) ? reason : $"{reason}\n{hint}";
+                context.Outputs.TryComplete(new ToolInvocationReceipt(ToolInvocationOutcomeCategory.AccessDenied));
 
             }
         }
@@ -822,6 +953,7 @@ internal sealed class SessionToolExecutionPipeline
         {
             sw.Stop();
             resultText = $"Tool access denied: {ex.DenyReason}";
+            context.Outputs.TryComplete(new ToolInvocationReceipt(ToolInvocationOutcomeCategory.AccessDenied));
 
         }
         catch (OperationCanceledException) when (batch.CancellationToken.IsCancellationRequested)
@@ -836,6 +968,13 @@ internal sealed class SessionToolExecutionPipeline
         {
             sw.Stop();
             resultText = $"Error executing tool: {ex.Message}";
+            var category = ex switch
+            {
+                UnauthorizedAccessException => ToolInvocationOutcomeCategory.AccessDenied,
+                FileNotFoundException or DirectoryNotFoundException => ToolInvocationOutcomeCategory.NotFound,
+                _ => ToolInvocationOutcomeCategory.TransientFailure
+            };
+            context.Outputs.TryComplete(new ToolInvocationReceipt(category));
 
         }
 
@@ -849,6 +988,8 @@ internal sealed class SessionToolExecutionPipeline
                 resultText,
                 modelInputMaterialization.RequestedCount - modelInputMaterialization.MediaReferences.Count);
 
+        var receipt = context.Receipt
+            ?? new ToolInvocationReceipt(ToolInvocationOutcomeCategory.Success);
         var message = new SerializableChatMessage
         {
             Role = Protocol.ChatRole.Tool,
@@ -864,10 +1005,15 @@ internal sealed class SessionToolExecutionPipeline
             context.Outputs.FileAttachments,
             completedRuns,
             acceptedFindings,
+            authorizationAttemptId,
+            Receipt: receipt,
             ScratchCorrectionChange: consumedScratchKey is { } consumed
                 ? new SessionScratchCorrectionChange.Consume(consumed)
                 : null);
     }
+
+    internal static string BuildNativeToolCorrection(ToolName toolName)
+        => $"Shell execution stopped because '{toolName.Value}' is a native Netclaw tool.";
 
     internal static SessionScratchCallSemantics? BuildSessionScratchCallSemantics(
         FunctionCallContent toolCall,
@@ -1056,7 +1202,8 @@ internal sealed class SessionToolExecutionPipeline
                 ToolCallId = new ToolCallId(tc.CallId),
                 Name = tc.Name
             };
-            return new ToolCallResult(message, [], [], [], []);
+            return new ToolCallResult(
+                message, [], [], [], [], context.Approval.AuthorizationAttemptId);
         }
 
         // A background job inherits the submitting turn's authority context.
@@ -1111,7 +1258,8 @@ internal sealed class SessionToolExecutionPipeline
                 Boundary = batch.TurnContext.Boundary,
                 OutputLogPath = started.OutputLogPath
             };
-            return new ToolCallResult(resultMessage, [], [], [], [], jobInfo);
+            return new ToolCallResult(
+                resultMessage, [], [], [], [], context.Approval.AuthorizationAttemptId, jobInfo);
         }
         catch (Exception ex)
         {
@@ -1124,7 +1272,8 @@ internal sealed class SessionToolExecutionPipeline
                 ToolCallId = new ToolCallId(tc.CallId),
                 Name = tc.Name
             };
-            return new ToolCallResult(errorMessage, [], [], [], []);
+            return new ToolCallResult(
+                errorMessage, [], [], [], [], context.Approval.AuthorizationAttemptId);
         }
     }
 
@@ -1280,8 +1429,7 @@ internal sealed class SessionToolExecutionPipeline
 
     internal static string BuildSessionScratchCorrection(string sessionDirectory)
         => "Tool execution deferred: shared_temporary_directory\n" +
-           $"Use the private session scratch directory '{sessionDirectory}' for disposable artifacts. " +
-           "Author a replacement shell call there. If this exact platform path is required, retry the original call unchanged.";
+           $"Session scratch directory: '{sessionDirectory}'.";
 
     /// <summary>
     /// Builds the agent-facing correction for reviewed-safe shell work whose
@@ -1303,7 +1451,7 @@ internal sealed class SessionToolExecutionPipeline
         }
 
         return "Tool execution deferred: working_directory_not_declared\n" +
-               $"Call set_working_directory with '{context.SuggestedProjectDirectory}', then retry this exact shell command unchanged.";
+               $"Project directory: '{context.SuggestedProjectDirectory}'.";
     }
 
     /// <summary>

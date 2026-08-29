@@ -99,6 +99,199 @@ public sealed class ConfigSchemaDoctorCheckTests
     }
 
     [Fact]
+    public async Task ReturnsPass_WhenMemoryEmbeddingsConfigMatchesSchemaV1()
+    {
+        var basePath = CreateTempBasePath();
+        var paths = new NetclawPaths(basePath);
+        paths.EnsureDirectoriesExist();
+
+        await File.WriteAllTextAsync(paths.NetclawConfigPath,
+            """
+            {
+              "configVersion": 1,
+              "Memory": {
+                "Enabled": true,
+                "Embeddings": {
+                  "Enabled": true,
+                  "ModelId": "snowflake-arctic-embed-m",
+                  "AutoDownload": false
+                }
+              }
+            }
+            """, TestContext.Current.CancellationToken);
+
+        var check = new ConfigSchemaDoctorCheck(paths);
+        var result = await check.RunAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(DoctorSeverity.Pass, result.Severity);
+    }
+
+    [Fact]
+    public async Task ReturnsError_WhenMemoryEmbeddingsHasAnUnknownProperty()
+    {
+        var basePath = CreateTempBasePath();
+        var paths = new NetclawPaths(basePath);
+        paths.EnsureDirectoriesExist();
+
+        await File.WriteAllTextAsync(paths.NetclawConfigPath,
+            """
+            {
+              "configVersion": 1,
+              "Memory": {
+                "Embeddings": {
+                  "Enabled": true,
+                  "NotARealProperty": "oops"
+                }
+              }
+            }
+            """, TestContext.Current.CancellationToken);
+
+        var check = new ConfigSchemaDoctorCheck(paths);
+        var result = await check.RunAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(DoctorSeverity.Error, result.Severity);
+    }
+
+    [Fact]
+    public async Task ReturnsPass_WhenMemoryCurationConfigMatchesSchemaV1()
+    {
+        var basePath = CreateTempBasePath();
+        var paths = new NetclawPaths(basePath);
+        paths.EnsureDirectoriesExist();
+
+        await File.WriteAllTextAsync(paths.NetclawConfigPath,
+            """
+            {
+              "configVersion": 1,
+              "Memory": {
+                "Enabled": true,
+                "Curation": {
+                  "NominatorSimilarityThreshold": 0.9,
+                  "NominatorK": 3,
+                  "LlmMaxOutputTokens": 2048,
+                  "LlmTimeoutSeconds": 15
+                }
+              }
+            }
+            """, TestContext.Current.CancellationToken);
+
+        var check = new ConfigSchemaDoctorCheck(paths);
+        var result = await check.RunAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(DoctorSeverity.Pass, result.Severity);
+    }
+
+    [Fact]
+    public async Task ReturnsError_WhenMemoryCurationHasAnUnknownProperty()
+    {
+        var basePath = CreateTempBasePath();
+        var paths = new NetclawPaths(basePath);
+        paths.EnsureDirectoriesExist();
+
+        await File.WriteAllTextAsync(paths.NetclawConfigPath,
+            """
+            {
+              "configVersion": 1,
+              "Memory": {
+                "Curation": {
+                  "NominatorK": 3,
+                  "NotARealProperty": "oops"
+                }
+              }
+            }
+            """, TestContext.Current.CancellationToken);
+
+        var check = new ConfigSchemaDoctorCheck(paths);
+        var result = await check.RunAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(DoctorSeverity.Error, result.Severity);
+    }
+
+    [Fact]
+    public async Task ReturnsPass_WhenMemoryRecallConfigMatchesSchemaV1()
+    {
+        var basePath = CreateTempBasePath();
+        var paths = new NetclawPaths(basePath);
+        paths.EnsureDirectoriesExist();
+
+        await File.WriteAllTextAsync(paths.NetclawConfigPath,
+            """
+            {
+              "configVersion": 1,
+              "Memory": {
+                "Enabled": true,
+                "Recall": {
+                  "VectorWeight": 0.6,
+                  "LexicalWeight": 0.4,
+                  "MinCosineSimilarity": 0.5,
+                  "RecencyHalfLifeDays": 45
+                }
+              }
+            }
+            """, TestContext.Current.CancellationToken);
+
+        var check = new ConfigSchemaDoctorCheck(paths);
+        var result = await check.RunAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(DoctorSeverity.Pass, result.Severity);
+    }
+
+    // memory-query-prefix design D3: MinCosineSimilarity is now nullable
+    // ("type": ["number", "null"]) — an explicit null (the default, meaning "follow the active
+    // model's manifest calibration") must remain schema-valid, not just an omitted property.
+    [Fact]
+    public async Task ReturnsPass_WhenMemoryRecallMinCosineSimilarityIsExplicitlyNull()
+    {
+        var basePath = CreateTempBasePath();
+        var paths = new NetclawPaths(basePath);
+        paths.EnsureDirectoriesExist();
+
+        await File.WriteAllTextAsync(paths.NetclawConfigPath,
+            """
+            {
+              "configVersion": 1,
+              "Memory": {
+                "Enabled": true,
+                "Recall": {
+                  "MinCosineSimilarity": null
+                }
+              }
+            }
+            """, TestContext.Current.CancellationToken);
+
+        var check = new ConfigSchemaDoctorCheck(paths);
+        var result = await check.RunAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(DoctorSeverity.Pass, result.Severity);
+    }
+
+    [Fact]
+    public async Task ReturnsError_WhenMemoryRecallHasAnUnknownProperty()
+    {
+        var basePath = CreateTempBasePath();
+        var paths = new NetclawPaths(basePath);
+        paths.EnsureDirectoriesExist();
+
+        await File.WriteAllTextAsync(paths.NetclawConfigPath,
+            """
+            {
+              "configVersion": 1,
+              "Memory": {
+                "Recall": {
+                  "VectorWeight": 0.6,
+                  "NotARealProperty": "oops"
+                }
+              }
+            }
+            """, TestContext.Current.CancellationToken);
+
+        var check = new ConfigSchemaDoctorCheck(paths);
+        var result = await check.RunAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(DoctorSeverity.Error, result.Severity);
+    }
+
+    [Fact]
     public async Task ReturnsPass_WhenReverseProxyTrustedProxiesLookValid()
     {
         var basePath = CreateTempBasePath();

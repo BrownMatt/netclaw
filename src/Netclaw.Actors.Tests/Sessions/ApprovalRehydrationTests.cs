@@ -106,6 +106,9 @@ public sealed class ApprovalRehydrationTests : LlmSessionTestBase
             TimeSpan.FromSeconds(5), cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal(callId, request.CallId.Value);
         Assert.Equal("shell_execute", request.ToolName.Value);
+        Assert.True(Netclaw.Tools.AuthorizationAttemptId.TryParse(
+            request.AuthorizationAttemptId,
+            out var authorizationAttemptId));
 
         // First tool attempt threw the approval-required exception — the tool
         // has not actually executed yet.
@@ -146,6 +149,9 @@ public sealed class ApprovalRehydrationTests : LlmSessionTestBase
         Assert.Equal(TurnOutcome.Completed, completed.Outcome);
 
         Assert.Equal(1, _toolExecutor.SuccessfulExecutions);
+        Assert.Equal(
+            [authorizationAttemptId, authorizationAttemptId],
+            _toolExecutor.AuthorizationAttempts.ToArray());
 
         // No duplicate approval prompt was emitted for the re-driven call.
         await subscriberB.ExpectNoMsgAsync(
@@ -201,8 +207,10 @@ public sealed class ApprovalRehydrationTests : LlmSessionTestBase
         // Idle timeout with the recovered approval still pending: the session
         // passivates (approval state is journaled) instead of deferring forever.
         var escapedId = Uri.EscapeDataString(sessionId.Value);
+        // The resolve budget bounds the session spawn and recovery under a
+        // starved CI scheduler. It does not measure correctness.
         var child = await Sys.ActorSelection($"/user/session-manager/{escapedId}")
-            .ResolveOne(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            .ResolveOne(TimeSpan.FromSeconds(15), TestContext.Current.CancellationToken);
         Watch(child);
         child.Tell(new LeaveSession(rejoinProbe) { SessionId = sessionId });
         child.Tell(ReceiveTimeout.Instance);
@@ -1516,8 +1524,10 @@ public sealed class ApprovalRehydrationTests : LlmSessionTestBase
         await subscriber.ExpectMsgAsync<SessionJoined>(cancellationToken: TestContext.Current.CancellationToken);
 
         var escapedId = Uri.EscapeDataString(sessionId.Value);
+        // The resolve budget bounds the session spawn and recovery under a
+        // starved CI scheduler. It does not measure correctness.
         var child = await Sys.ActorSelection($"/user/session-manager/{escapedId}")
-            .ResolveOne(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            .ResolveOne(TimeSpan.FromSeconds(15), TestContext.Current.CancellationToken);
         Watch(child);
 
         // Drop the subscriber and force the idle timeout so the session enters
@@ -1550,8 +1560,13 @@ public sealed class ApprovalRehydrationTests : LlmSessionTestBase
     private async Task ColdRespawnAsync(SessionId sessionId)
     {
         var escapedId = Uri.EscapeDataString(sessionId.Value);
+        // The resolve waits for the session child to finish its spawn and its
+        // Akka.Persistence recovery. The budget bounds that multi-hop startup
+        // under a starved CI scheduler. It does not measure correctness. About
+        // twenty cold-respawn tests call this helper, so a short budget makes
+        // the whole group flake at once.
         var child = await Sys.ActorSelection($"/user/session-manager/{escapedId}")
-            .ResolveOne(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            .ResolveOne(TimeSpan.FromSeconds(15), TestContext.Current.CancellationToken);
         Watch(child);
         Sys.Stop(child);
         await ExpectTerminatedAsync(child, cancellationToken: TestContext.Current.CancellationToken);
@@ -1594,6 +1609,9 @@ internal sealed class ApprovalGateToolExecutor : IToolExecutor
 
     public int SuccessfulExecutions => _successfulExecutions;
 
+    public System.Collections.Concurrent.ConcurrentQueue<Netclaw.Tools.AuthorizationAttemptId>
+        AuthorizationAttempts { get; } = new();
+
     public TaskCompletionSource<object?> BlockedExecutionStarted { get; private set; } =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -1631,6 +1649,10 @@ internal sealed class ApprovalGateToolExecutor : IToolExecutor
         Netclaw.Tools.ToolExecutionContext? context = null,
         CancellationToken ct = default)
     {
+        AuthorizationAttempts.Enqueue(
+            context?.Approval.AuthorizationAttemptId
+            ?? throw new InvalidOperationException("Execution context is required."));
+
         if (GatedTools.Contains(toolCall.Name))
         {
             var hasOneTimeGrant = context is not null

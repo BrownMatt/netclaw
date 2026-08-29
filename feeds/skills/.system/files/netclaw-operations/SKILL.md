@@ -3,7 +3,7 @@ name: netclaw-operations
 description: "REQUIRED when the user asks about scheduling, reminders, cron jobs, timers, background jobs, diagnostics, troubleshooting, MCP tools, daemon health, identity updates, or Netclaw capabilities and self-maintenance."
 metadata:
   author: netclaw
-  version: "2.51.0"
+  version: "2.65.2"
 ---
 
 # Netclaw Operations
@@ -37,6 +37,34 @@ a reference file — load the one matching the user's intent with
 | Pair remote devices, manage access | `skill_read_resource('netclaw-operations', 'references/devices.md')` |
 | Kick the tires on Netclaw end-to-end locally | `skill_read_resource('netclaw-operations', 'references/demo-apphost.md')` |
 
+## File and Shell Selection
+
+When available, use `file_read` for a known local file read.
+When available, use `file_list` for a known local directory listing.
+Use `file_search` for bounded recursive name or literal text search.
+Use `file_read` for image metadata.
+Issue independent `file_read` calls in parallel when several paths are known.
+Use `tool_output_read` to continue a spilled result by call id.
+When available, use `file_write` or `file_edit` for a known local file change.
+When available, use `web_search` for external discovery and `web_fetch` for a known external page.
+When available, use `shell_execute` for local search, VCS, builds, tests, processes, or requested shell behavior.
+Do not substitute shell commands when a listed first-party tool satisfies the task.
+Do not delegate a known file operation that an available file tool can complete.
+After a successful file tool result, do not use shell only to verify it unless the user requests shell behavior.
+For disposable text, use `file_write` then `file_read`; do not attempt a shell redirect first.
+Use `load_tool` directly for a known exact tool name.
+Use `search_tools` when the capability is known but its exact tool name is not.
+
+Keep shell approval friction bounded:
+
+1. Start with the smallest single shell operation that directly answers the request.
+2. Use one operation per call. Keep independent searches and diagnostics separate; do not join them with separators or labels.
+3. Add a pipeline only when the requested result requires it.
+4. Do not use shell only to verify a successful structured tool result.
+5. After an approval-required result, do not retry or substitute shell variants.
+6. A `Tool access denied:` result is terminal; do not change scope, retry, or substitute another tool.
+7. Apply one `Tool execution deferred:` correction unchanged; otherwise use a structured tool or report the block once.
+
 ## Project Directory
 
 `set_working_directory(path)` sets the session's project root (absolute path within
@@ -44,16 +72,25 @@ allowed roots); the project's identity file (`.netclaw/AGENTS.md`, `CLAUDE.md`,
 `AGENTS.md`, or `CONTEXT.md`) then loads into the prompt. Full rules:
 `skill_read_resource('netclaw-operations', 'references/projects.md')`.
 
-Use the `shell_execute` `WorkingDirectory` argument for one command in another
-directory. This argument and an absolute path operand provide exact scope, but
-they do not add a safe-space root. Do not add an inline `cd` unless directory
-change is the requested behavior.
+Choose directories in this order:
 
-When available, use `set_working_directory` before shell work if several
-commands target another user-named project.
-This rule also applies to subagents and commands with absolute path operands.
+1. For declared-project work, omit `WorkingDirectory`; the shell uses `project_dir`.
+2. For one call in a named child directory, set typed `WorkingDirectory`.
+3. Use `session_dir` for disposable writable work outside a project; do not substitute platform temporary storage.
+4. Use an inline directory change only when the task requests that behavior.
+
+Typed `WorkingDirectory` and absolute operands give exact scope but add no safe-space root.
+Program-specific directory options do not replace `WorkingDirectory`.
+
+When available, call `set_working_directory` before the first tool call for
+another user-named project.
+This rule applies to shell tools, file tools, subagents, and absolute path operands.
 Do not repeat the call when `[working-context]` already names that project. If
-the tool rejects a path, correct the path and retry it before work continues.
+the tool rejects a path, declare the user-provided fallback before other tools.
+Do not probe a named project path before declaring it.
+Use the task's first project path exactly; do not substitute its parent first.
+Honor a request to keep the current project unchanged.
+A denied child-directory call does not permit a project change.
 
 For Team and Personal sessions, `[working-context]` is refreshed at the start
 of each new turn. In a Git project it includes the active worktree, branch,
@@ -89,6 +126,11 @@ meta keys also accept the underscore-dropped/cased/shortened forms
 `Background` likewise). The supplied value is always *used* — never silently
 defaulted.
 
+Every tool call requires a non-empty `_rationale` string. State the call intent
+and reason in one sentence. Apply this rule to each parallel call and each later
+tool iteration. If a correction reports a missing rationale, fix every call
+before the retry.
+
 Three things are still rejected loudly, and when rejected the tool did NOT run —
 fix and re-issue once, do not retry the same shape:
 
@@ -106,9 +148,9 @@ Tool output is bounded to a small inline budget
 the context window. When a tool's output exceeds that budget you get a head+tail
 view inline plus a pointer to the full output — not the whole thing:
 
-- **`shell_execute`** spills the full (redacted) output to
-  `{session}/tool-calls/{toolCallId}.log` and gives you the path. Read a slice with
-  `file_read` (`StartLine`/`Limit`) or `grep` it — do NOT re-run the command to see more.
+- **`shell_execute`** retains the full redacted output inside the current session.
+  Use `tool_output_read` with the returned `CallId`, `Start`, and `Limit` values.
+  Do not request a path or rerun the source tool to read more.
 - **`file_read`** on a large file returns the head and steers you to read a
   specific range with `StartLine`/`Limit` or `grep` (`StartLine` is a 1-based line
   number — line 1 is the first line). Don't `cat` a huge file through
@@ -117,13 +159,14 @@ view inline plus a pointer to the full output — not the whole thing:
   `check_background_job` returns a tail, and you can `file_read`/`grep` the log for the rest.
   Netclaw deletes a terminal job's definition and logs 24 hours after completion.
 
-Reading a targeted range or grepping is always cheaper than re-running a command or
-re-reading a whole file. Secret-bearing values are redacted from all tool output.
+Use bounded continuation before re-running a command or re-reading a whole file.
+Secret-bearing values are redacted from all tool output.
 
 ## Tool Discovery
 
-Only a core toolset is always loaded. Use `search_tools(query)` to find additional
-or MCP tools by capability before concluding a tool doesn't exist. Full guidance:
+Only a core toolset is always loaded. Use `load_tool(name)` when an exact deferred
+tool name is known. Use `search_tools(query)` to find tools by capability when the
+name is unknown. Full guidance:
 `skill_read_resource('netclaw-operations', 'references/tools.md')`.
 
 MCP servers can also supply workflow skills. These skills use names such as
@@ -270,10 +313,9 @@ declares scope implicitly.
 
 The approval gate runs three layers in order:
 
-Use the announced `session_dir` as private scratch for disposable command
-output. Preserve `/tmp` or the Windows temporary root when the task explicitly
-requires that platform path. Netclaw does not automatically clean session
-scratch yet.
+The directory order reserves `session_dir` for disposable non-project output.
+Preserve an explicitly required platform temporary path.
+Netclaw does not automatically clean session scratch yet.
 
 1. **Hard-deny list** — system-protected paths. Always blocks.
 2. **Safe-verb ∩ safe-space short-circuit** — when the verb is on the curated
@@ -448,7 +490,9 @@ Add or switch model providers (including OAuth login) and configure search backe
 ## Diagnostics, Kill Switches & Self-Maintenance
 
 When something is broken, start with `netclaw status`, then `netclaw doctor`. Feature
-kill switches and self-update/health are covered in the reference. Full guidance:
+kill switches and self-update/health are covered in the reference. Memory embeddings
+can be backfilled with `netclaw memory backfill-embeddings [--force]`; doctor checks
+memory embedding availability. Full guidance:
 `skill_read_resource('netclaw-operations', 'references/diagnostics.md')`.
 
 ## Identity
