@@ -3,7 +3,7 @@ name: netclaw-operations
 description: "REQUIRED when the user asks about scheduling, reminders, cron jobs, timers, background jobs, diagnostics, troubleshooting, MCP tools, daemon health, identity updates, or Netclaw capabilities and self-maintenance."
 metadata:
   author: netclaw
-  version: "2.65.2"
+  version: "2.66.0"
 ---
 
 # Netclaw Operations
@@ -25,6 +25,7 @@ a reference file — load the one matching the user's intent with
 | How tool arguments are validated | [Tool argument validation](#tool-argument-validation) |
 | Handle very large tool output | [Large tool output](#large-tool-output) |
 | Understand approval prompts | [Approval Prompts](#approval-prompts) |
+| Understand operator folder grants and uploaded attachments | [Folder grants and uploads](#folder-grants-and-uploads) |
 | Update identity / where facts go (identity vs memory) | [Identity](#identity) |
 | Work on a project, switch projects | `skill_read_resource('netclaw-operations', 'references/projects.md')` |
 | Discover MCP / available tools | `skill_read_resource('netclaw-operations', 'references/tools.md')` |
@@ -472,6 +473,29 @@ Skills load on demand; manage skills and sources via the skill tools. Full guida
 Inbound webhooks are configured per route; route files are secret-bearing and
 protected. Attachment handling is covered alongside. Full setup + rules:
 `skill_read_resource('netclaw-operations', 'references/webhooks.md')`.
+
+## Folder grants and uploads
+
+The operator can act on the session from a desktop client (GUI):
+
+- **Folder grants.** The operator can grant this session read, modify, and
+  create access to one folder tree. Granted roots appear under
+  `granted_folders:` in the `[working-context]` block. Use the normal file
+  tools (`file_read`, `file_write`, `file_list`) on paths under a granted
+  root. A grant does NOT change shell approval: `shell_execute` under a
+  granted root still routes to the approval prompt, and
+  `set_working_directory` behavior is unchanged. The operator can revoke a
+  grant at any time; after revocation the next file call under that root is
+  denied — do not treat a past success as standing authority.
+- **Uploaded files.** A file the operator attaches arrives as an
+  `[attachment]` line in the user message, exactly like a channel
+  attachment: the line names the file and its `inbox/` path inside the
+  session directory. Read it with `file_read` when the content is not
+  inlined. The attachment grants no authority outside the session
+  directory. Uploads are gated by the Personal audience attachment policy
+  (`Tools.AudienceProfiles.Personal.ChannelAttachments`: allowed
+  categories and `MaxFileBytes`); the daemon endpoint is
+  `POST /api/sessions/attachments`.
 
 ## Secret Management
 

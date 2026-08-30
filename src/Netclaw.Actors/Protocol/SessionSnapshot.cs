@@ -78,6 +78,13 @@ public sealed record SessionSnapshot : INetclawSerializableMessage
     public IReadOnlyList<ActiveJobInfo> ActiveBackgroundJobs { get; init; } =
         Array.Empty<ActiveJobInfo>();
 
+    /// <summary>
+    /// Uploaded attachments that wait for the next user message. Persisted
+    /// so a restart between upload and send loses nothing.
+    /// </summary>
+    public IReadOnlyList<Sessions.SessionProtocol.PendingSessionAttachment> PendingAttachments { get; init; } =
+        Array.Empty<Sessions.SessionProtocol.PendingSessionAttachment>();
+
     public IReadOnlyList<AdoptedContextSnapshotRecord> AdoptedContextRecords { get; init; } =
         Array.Empty<AdoptedContextSnapshotRecord>();
 }

@@ -81,6 +81,48 @@ public static partial class SessionProtocol
     }
 
     /// <summary>
+    /// Operator command that grants the session read, modify, and create
+    /// access to one folder tree for first-party file tools. The session
+    /// actor validates the path before persistence and replies with
+    /// <see cref="CommandAck"/> only after the grant event is persisted, or
+    /// <see cref="CommandNack"/> when validation rejects the path. A grant
+    /// never joins the shell approval safe-space set.
+    /// </summary>
+    public sealed record AddFolderGrant : ISessionCommand, INoSerializationVerificationNeeded
+    {
+        public required SessionId SessionId { get; init; }
+
+        /// <summary>Absolute path of an existing directory to grant.</summary>
+        public required string Path { get; init; }
+    }
+
+    /// <summary>
+    /// Daemon command that records an uploaded attachment as pending for the
+    /// session's next user message. The upload endpoint sends this after it
+    /// stored the file in the session inbox; the reply
+    /// (<see cref="CommandAck"/>) follows the persisted event.
+    /// </summary>
+    public sealed record AddPendingAttachment : ISessionCommand, INoSerializationVerificationNeeded
+    {
+        public required SessionId SessionId { get; init; }
+
+        public required PendingSessionAttachment Attachment { get; init; }
+    }
+
+    /// <summary>
+    /// Operator command that removes a folder grant. Revocation is
+    /// immediate: the ack follows the persisted removal event, and the next
+    /// policy evaluation reads the updated grant list. Replies
+    /// <see cref="CommandNack"/> when the path is not currently granted.
+    /// </summary>
+    public sealed record RemoveFolderGrant : ISessionCommand, INoSerializationVerificationNeeded
+    {
+        public required SessionId SessionId { get; init; }
+
+        public required string Path { get; init; }
+    }
+
+    /// <summary>
     /// Text-only approval reply for a pending <see cref="ToolInteractionRequest"/>
     /// when the channel binding does not have the original prompt state locally.
     /// The session resolves the applicable pending interaction from its own

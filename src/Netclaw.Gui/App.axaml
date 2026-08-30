@@ -5,6 +5,9 @@
 
   <Application.Styles>
     <FluentTheme />
+    <!-- AvaloniaEdit is a templated control; without its theme styles the
+         markdown editor renders as an empty, zero-size control. -->
+    <StyleInclude Source="avares://AvaloniaEdit/Themes/Fluent/AvaloniaEdit.xaml" />
   </Application.Styles>
 
 </Application>

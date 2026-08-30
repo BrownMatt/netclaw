@@ -1,36 +1,198 @@
 <Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:vm="using:Netclaw.Gui.ViewModels"
+        xmlns:views="using:Netclaw.Gui.Views"
         x:Class="Netclaw.Gui.Views.MainWindow"
         x:DataType="vm:MainWindowViewModel"
         Title="Netclaw"
-        Width="900" Height="640">
+        Width="1100" Height="720">
 
-  <DockPanel Margin="8">
+  <Grid ColumnDefinitions="240,*" Margin="8">
 
-    <TextBlock DockPanel.Dock="Top"
-               Text="{Binding Status}"
-               Margin="0,0,0,8" />
+    <!-- Left: read-only session list -->
+    <DockPanel Grid.Column="0" Margin="0,0,8,0">
+      <TextBlock DockPanel.Dock="Top" Text="Sessions" FontWeight="Bold" Margin="4,0,0,6" />
+      <ListBox ItemsSource="{Binding SessionList.Sessions}"
+               SelectedItem="{Binding SelectedSession, Mode=TwoWay}"
+               SelectionChanged="OnSessionSelectionChanged">
+        <ListBox.ItemTemplate>
+          <DataTemplate DataType="vm:SessionListItemViewModel">
+            <StackPanel Margin="0,2">
+              <TextBlock Text="{Binding DisplayTitle}" TextTrimming="CharacterEllipsis" />
+              <TextBlock Text="{Binding Channel}" Opacity="0.5" FontSize="11" />
+            </StackPanel>
+          </DataTemplate>
+        </ListBox.ItemTemplate>
+      </ListBox>
+    </DockPanel>
 
-    <Grid DockPanel.Dock="Bottom" ColumnDefinitions="*,Auto" Margin="0,8,0,0">
-      <TextBox Grid.Column="0"
-               Text="{Binding InputText}"
-               PlaceholderText="Message the agent...">
-        <TextBox.KeyBindings>
-          <KeyBinding Gesture="Enter" Command="{Binding SendCommand}" />
-        </TextBox.KeyBindings>
-      </TextBox>
-      <Button Grid.Column="1"
-              Content="Send"
-              Command="{Binding SendCommand}"
-              Margin="8,0,0,0" />
-    </Grid>
+    <!-- Middle: chat -->
+    <DockPanel Grid.Column="1">
 
-    <TextBox Text="{Binding OutputText, Mode=OneWay}"
-             IsReadOnly="True"
-             AcceptsReturn="True"
-             TextWrapping="Wrap" />
+      <TextBlock DockPanel.Dock="Top"
+                 Text="{Binding Status}"
+                 Margin="0,0,0,4" />
 
-  </DockPanel>
+      <!-- Composer -->
+      <StackPanel DockPanel.Dock="Bottom" Margin="0,6,0,0" Spacing="4">
+
+        <!-- Grant chips -->
+        <ItemsControl ItemsSource="{Binding Chat.GrantedFolders}">
+          <ItemsControl.ItemsPanel>
+            <ItemsPanelTemplate>
+              <WrapPanel />
+            </ItemsPanelTemplate>
+          </ItemsControl.ItemsPanel>
+          <ItemsControl.ItemTemplate>
+            <DataTemplate DataType="x:String">
+              <Border Background="#2233AA33" CornerRadius="10" Padding="8,2" Margin="0,0,6,4">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                  <TextBlock Text="{Binding}" FontSize="11" VerticalAlignment="Center" />
+                  <Button Content="x" FontSize="10" Padding="4,0"
+                          Command="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).RemoveGrantCommand}"
+                          CommandParameter="{Binding}" />
+                </StackPanel>
+              </Border>
+            </DataTemplate>
+          </ItemsControl.ItemTemplate>
+        </ItemsControl>
+
+        <!-- Pending attachment chips -->
+        <ItemsControl ItemsSource="{Binding PendingAttachments}">
+          <ItemsControl.ItemsPanel>
+            <ItemsPanelTemplate>
+              <WrapPanel />
+            </ItemsPanelTemplate>
+          </ItemsControl.ItemsPanel>
+          <ItemsControl.ItemTemplate>
+            <DataTemplate DataType="vm:PendingAttachmentChip">
+              <Border Background="#223388CC" CornerRadius="10" Padding="8,2" Margin="0,0,6,4">
+                <TextBlock Text="{Binding FileName}" FontSize="11" />
+              </Border>
+            </DataTemplate>
+          </ItemsControl.ItemTemplate>
+        </ItemsControl>
+
+        <Grid ColumnDefinitions="Auto,*,Auto">
+          <Button Grid.Column="0" Content="+" Margin="0,0,8,0" VerticalAlignment="Bottom">
+            <Button.Flyout>
+              <MenuFlyout>
+                <MenuItem Header="Attach file..." Click="OnAttachFileClick" />
+                <MenuItem Header="Grant folder access..." Click="OnGrantFolderClick" />
+              </MenuFlyout>
+            </Button.Flyout>
+          </Button>
+          <TextBox Grid.Column="1"
+                   Text="{Binding InputText}"
+                   PlaceholderText="Message the agent...">
+            <TextBox.KeyBindings>
+              <KeyBinding Gesture="Enter" Command="{Binding SendCommand}" />
+            </TextBox.KeyBindings>
+          </TextBox>
+          <Button Grid.Column="2"
+                  Content="Send"
+                  Command="{Binding SendCommand}"
+                  Margin="8,0,0,0" />
+        </Grid>
+
+        <!-- Activity indicator + usage line -->
+        <Grid ColumnDefinitions="*,Auto">
+          <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="8">
+            <TextBlock Text="{Binding Chat.ActivityText}" Opacity="0.7" FontSize="12" />
+            <TextBlock FontSize="12" Opacity="0.7"
+                       IsVisible="{Binding HasQueued}">
+              <Run Text="Queued: " /><Run Text="{Binding QueuedCount}" />
+            </TextBlock>
+          </StackPanel>
+          <TextBlock Grid.Column="1" Text="{Binding Chat.UsageText}" Opacity="0.6" FontSize="12" />
+        </Grid>
+      </StackPanel>
+
+      <!-- History: implicit DataTemplates select the visual per block type -->
+      <ScrollViewer x:Name="HistoryScroll">
+        <ItemsControl ItemsSource="{Binding Chat.Blocks}">
+          <ItemsControl.DataTemplates>
+
+            <DataTemplate DataType="vm:UserMessageBlockViewModel">
+              <Border Background="#22000000" CornerRadius="6" Padding="10,6" Margin="40,4,0,4"
+                      HorizontalAlignment="Right">
+                <SelectableTextBlock Text="{Binding Text}" TextWrapping="Wrap" />
+              </Border>
+            </DataTemplate>
+
+            <DataTemplate DataType="vm:AssistantMessageBlockViewModel">
+              <Border CornerRadius="6" Padding="4" Margin="0,4,40,4">
+                <views:MarkdownView Markdown="{Binding Content}" />
+              </Border>
+            </DataTemplate>
+
+            <DataTemplate DataType="vm:ThinkingBlockViewModel">
+              <Expander Header="Thinking"
+                        IsExpanded="{Binding IsExpanded, Mode=TwoWay}"
+                        Margin="0,2,40,2">
+                <SelectableTextBlock Text="{Binding Content}" TextWrapping="Wrap"
+                                     Opacity="0.75" Margin="8,4" />
+              </Expander>
+            </DataTemplate>
+
+            <DataTemplate DataType="vm:ToolCallBlockViewModel">
+              <Expander Header="{Binding Header}"
+                        IsExpanded="{Binding IsExpanded, Mode=TwoWay}"
+                        Margin="0,2,40,2">
+                <StackPanel Margin="8,4" Spacing="6">
+                  <TextBlock Text="Arguments" FontWeight="Bold" />
+                  <SelectableTextBlock Text="{Binding ArgumentsJson}" TextWrapping="Wrap"
+                                       FontFamily="Cascadia Mono,Consolas,monospace" />
+                  <TextBlock Text="Result" FontWeight="Bold" />
+                  <SelectableTextBlock Text="{Binding Result}" TextWrapping="Wrap"
+                                       FontFamily="Cascadia Mono,Consolas,monospace" />
+                </StackPanel>
+              </Expander>
+            </DataTemplate>
+
+            <DataTemplate DataType="vm:ApprovalCardViewModel">
+              <Border BorderBrush="#CC8800" BorderThickness="1" CornerRadius="6"
+                      Padding="10" Margin="0,4,40,4">
+                <StackPanel Spacing="8">
+                  <TextBlock Text="{Binding DisplayText}" TextWrapping="Wrap" FontWeight="Bold" />
+                  <ItemsControl ItemsSource="{Binding Options}" IsVisible="{Binding CanRespond}">
+                    <ItemsControl.ItemsPanel>
+                      <ItemsPanelTemplate>
+                        <WrapPanel />
+                      </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                      <DataTemplate DataType="vm:ApprovalOptionViewModel">
+                        <Button Content="{Binding Label}"
+                                Margin="0,0,8,0"
+                                Command="{Binding $parent[ItemsControl].((vm:ApprovalCardViewModel)DataContext).RespondCommand}"
+                                CommandParameter="{Binding}" />
+                      </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                  </ItemsControl>
+                  <TextBlock IsVisible="{Binding IsResolved}" Opacity="0.8">
+                    <Run Text="Resolved: " /><Run Text="{Binding ResolvedLabel}" />
+                  </TextBlock>
+                </StackPanel>
+              </Border>
+            </DataTemplate>
+
+            <DataTemplate DataType="vm:UsageLineBlockViewModel">
+              <TextBlock Text="{Binding Text}" Opacity="0.6" FontSize="11" Margin="0,2" />
+            </DataTemplate>
+
+            <DataTemplate DataType="vm:ErrorBlockViewModel">
+              <Border BorderBrush="#CC3333" BorderThickness="1" CornerRadius="6"
+                      Padding="10,6" Margin="0,4,40,4">
+                <SelectableTextBlock Text="{Binding Message}" TextWrapping="Wrap" Foreground="#CC3333" />
+              </Border>
+            </DataTemplate>
+
+          </ItemsControl.DataTemplates>
+        </ItemsControl>
+      </ScrollViewer>
+
+    </DockPanel>
+  </Grid>
 
 </Window>

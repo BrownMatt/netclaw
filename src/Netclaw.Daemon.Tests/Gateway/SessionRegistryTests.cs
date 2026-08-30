@@ -28,10 +28,11 @@ public sealed class SessionRegistryTests
 {
     private SessionRegistry BuildRegistry(
         SessionIngressGate? ingressGate = null,
-        IRequiredActor<SignalRGatewayActorKey>? actorProvider = null)
+        IRequiredActor<SignalRGatewayActorKey>? actorProvider = null,
+        ISessionPipeline? pipeline = null)
         => new(
             actorProvider ?? new StubRequiredActor(),
-            new NoopSessionPipeline(),
+            pipeline ?? new NoopSessionPipeline(),
             ingressGate ?? new SessionIngressGate(),
             new ClaimsPrincipalMapper(),
             TimeProvider.System,
@@ -212,6 +213,74 @@ public sealed class SessionRegistryTests
         Assert.Equal(TransportAuthenticity.Unknown, enqueue.Input.Provenance!.TransportAuthenticity);
     }
 
+    [Fact]
+    public async Task AddFolderGrant_throws_when_connection_not_attached()
+    {
+        var registry = BuildRegistry();
+        await registry.CreateSessionAsync("conn-1", "tui");
+
+        await Assert.ThrowsAsync<Microsoft.AspNetCore.SignalR.HubException>(
+            () => registry.AddFolderGrantAsync("conn-2", "signalr/any", "/tmp/folder"));
+    }
+
+    [Fact]
+    public async Task AddFolderGrant_sends_command_and_completes_on_ack()
+    {
+        var pipeline = new RecordingSessionPipeline();
+        var registry = BuildRegistry(pipeline: pipeline);
+        var sessionId = await registry.CreateSessionAsync("conn-1", "tui");
+
+        await registry.AddFolderGrantAsync("conn-1", sessionId, "/home/user/projects/alpha");
+
+        var command = Assert.IsType<AddFolderGrant>(Assert.Single(pipeline.AwaitedCommands));
+        Assert.Equal(sessionId, command.SessionId.Value);
+        Assert.Equal("/home/user/projects/alpha", command.Path);
+    }
+
+    [Fact]
+    public async Task AddFolderGrant_surfaces_the_session_rejection_reason()
+    {
+        var pipeline = new RecordingSessionPipeline
+        {
+            Response = feedback => new CommandNack(feedback.SessionId, "Grant path does not exist or is not a directory.")
+        };
+        var registry = BuildRegistry(pipeline: pipeline);
+        var sessionId = await registry.CreateSessionAsync("conn-1", "tui");
+
+        var ex = await Assert.ThrowsAsync<Microsoft.AspNetCore.SignalR.HubException>(
+            () => registry.AddFolderGrantAsync("conn-1", sessionId, "/does/not/exist"));
+
+        Assert.Equal("Grant path does not exist or is not a directory.", ex.Message);
+    }
+
+    [Fact]
+    public async Task RemoveFolderGrant_sends_command_and_completes_on_ack()
+    {
+        var pipeline = new RecordingSessionPipeline();
+        var registry = BuildRegistry(pipeline: pipeline);
+        var sessionId = await registry.CreateSessionAsync("conn-1", "tui");
+
+        await registry.RemoveFolderGrantAsync("conn-1", sessionId, "/home/user/projects/alpha");
+
+        var command = Assert.IsType<RemoveFolderGrant>(Assert.Single(pipeline.AwaitedCommands));
+        Assert.Equal(sessionId, command.SessionId.Value);
+        Assert.Equal("/home/user/projects/alpha", command.Path);
+    }
+
+    [Fact]
+    public async Task FolderGrant_throws_when_ingress_closed()
+    {
+        var gate = new SessionIngressGate();
+        var registry = BuildRegistry(gate);
+        var sessionId = await registry.CreateSessionAsync("conn-1", "tui");
+        gate.TryClose(SessionIngressGate.RestartInProgressMessage);
+
+        var ex = await Assert.ThrowsAsync<Microsoft.AspNetCore.SignalR.HubException>(
+            () => registry.AddFolderGrantAsync("conn-1", sessionId, "/tmp/folder"));
+
+        Assert.Equal(SessionIngressGate.RestartInProgressMessage, ex.Message);
+    }
+
     /// <summary>
     /// Stub implementation of <see cref="IRequiredActor{T}"/> that returns
     /// <see cref="ActorRefs.Nobody"/> for all requests. Used to isolate
@@ -285,5 +354,33 @@ public sealed class SessionRegistryTests
 
         public Task<ISessionResponse> SendFeedbackAndWaitAsync(IWithSessionId feedback, CancellationToken ct = default)
             => Task.FromResult<ISessionResponse>(CommandAck.For(feedback.SessionId));
+    }
+
+    /// <summary>
+    /// Fake pipeline that records ack-awaited commands and returns a
+    /// configurable session response, so grant-routing tests can assert
+    /// both the ack path and the rejection path.
+    /// </summary>
+    private sealed class RecordingSessionPipeline : ISessionPipeline
+    {
+        public List<IWithSessionId> AwaitedCommands { get; } = [];
+
+        public Func<IWithSessionId, ISessionResponse>? Response { get; init; }
+
+        public Task<MaterializedSession> CreateAsync(
+            SessionId sessionId,
+            SessionPipelineOptions options,
+            Akka.Streams.IMaterializer? materializer = null,
+            CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+
+        public Task SendFeedbackAsync(IWithSessionId feedback, CancellationToken ct = default)
+            => Task.CompletedTask;
+
+        public Task<ISessionResponse> SendFeedbackAndWaitAsync(IWithSessionId feedback, CancellationToken ct = default)
+        {
+            AwaitedCommands.Add(feedback);
+            return Task.FromResult(Response?.Invoke(feedback) ?? CommandAck.For(feedback.SessionId));
+        }
     }
 }

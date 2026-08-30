@@ -218,6 +218,7 @@ static async Task RunDaemonAsync(
     builder.Services.AddSingleton<ISessionLifecycleObserver>(sp => sp.GetRequiredService<SessionCatalogService>());
     builder.Services.AddSingleton<ClaimsPrincipalMapper>();
     builder.Services.AddSingleton<SessionRegistry>();
+    builder.Services.AddSingleton<SessionAttachmentService>();
     builder.Services.AddSingleton<DaemonStartClock>();
     builder.Services.AddSingleton<DaemonRuntimeStatusService>();
     builder.Services.AddSingleton<DailyStatsPublisher>();
@@ -318,6 +319,30 @@ static async Task RunDaemonAsync(
         .WithName("ListSessions")
         .WithSummary("List the most recent sessions.")
         .WithTags("Sessions")
+        .RequireAuthorization();
+    app.MapPost("/api/sessions/attachments", async Task<IResult> (
+            string sessionId,
+            IFormFile file,
+            SessionAttachmentService attachments,
+            CancellationToken ct) =>
+        {
+            await using var content = file.OpenReadStream();
+            var outcome = await attachments.UploadAsync(
+                sessionId, file.FileName, file.ContentType, content, ct);
+            return outcome switch
+            {
+                AttachmentUploadOutcome.Accepted accepted => Results.Ok(accepted.Result),
+                AttachmentUploadOutcome.UnknownSession unknown => Results.NotFound(unknown.Reason),
+                AttachmentUploadOutcome.Rejected rejected => Results.BadRequest(rejected.Reason),
+                _ => Results.BadRequest("Upload failed.")
+            };
+        })
+        .WithName("UploadSessionAttachment")
+        .WithSummary("Upload a file that rides the session's next message once. " +
+                     "Gated by the Personal attachment policy (category and size). " +
+                     "Note: two operator clients on one session can interleave uploads and sends.")
+        .WithTags("Sessions")
+        .DisableAntiforgery()
         .RequireAuthorization();
     app.MapGet("/api/stats", async ValueTask<Ok<DaemonStats.Response>> (DaemonStatsService statsService, int? days, CancellationToken ct) =>
         TypedResults.Ok(await statsService.GetStatsAsync(days, ct)))

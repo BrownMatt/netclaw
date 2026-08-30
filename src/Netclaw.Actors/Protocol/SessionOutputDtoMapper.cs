@@ -105,6 +105,16 @@ public static class SessionOutputDtoMapper
             Title = msg.Title
         },
 
+        FolderGrantOutput msg => new SessionOutputDto
+        {
+            Type = SessionOutputTypes.FolderGrant,
+            SessionId = msg.SessionId.Value,
+            TimestampMs = msg.TimestampMs,
+            GrantPath = msg.Path,
+            IsGranted = msg.IsGranted,
+            GrantedFolders = [.. msg.GrantedFolders]
+        },
+
         ErrorOutput msg => new SessionOutputDto
         {
             Type = SessionOutputTypes.Error,
@@ -284,6 +294,14 @@ public static class SessionOutputDtoMapper
             {
                 SessionId = sessionId,
                 TimestampMs = dto.TimestampMs
+            },
+            SessionOutputTypes.FolderGrant => new FolderGrantOutput
+            {
+                SessionId = sessionId,
+                TimestampMs = dto.TimestampMs,
+                Path = dto.GrantPath ?? string.Empty,
+                IsGranted = dto.IsGranted ?? false,
+                GrantedFolders = dto.GrantedFolders ?? []
             },
             SessionOutputTypes.Error => new ErrorOutput
             {

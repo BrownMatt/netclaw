@@ -23,6 +23,7 @@ public static class SessionOutputTypes
     public const string Usage = "usage";
     public const string TurnCompleted = "turn_completed";
     public const string SessionTitle = "session_title";
+    public const string FolderGrant = "folder_grant";
     public const string Error = "error";
     public const string File = "file";
     public const string SubAgent = "subagent";
@@ -135,4 +136,9 @@ public sealed record SessionOutputDto
     public string? FilePath { get; init; }
     public string? FileName { get; init; }
     public string? MimeType { get; init; }
+
+    // Folder Grant
+    public string? GrantPath { get; init; }
+    public bool? IsGranted { get; init; }
+    public List<string>? GrantedFolders { get; init; }
 }

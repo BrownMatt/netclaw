@@ -14,6 +14,10 @@ namespace Netclaw.Channels;
 
 public static class AttachmentIngressFormatting
 {
+    // The [attachment] line format lives in AttachmentLineFormat
+    // (Netclaw.Actors.Protocol) so the session actor's pending-attachment
+    // embed and channel ingress share one implementation. These forwarders
+    // keep the existing channel-facing surface.
     public static string BuildAttachmentLine(
         string name,
         string mimeType,
@@ -21,49 +25,10 @@ public static class AttachmentIngressFormatting
         string relativePath,
         bool inlined,
         string? note)
-    {
-        var inlinedWire = inlined ? "true" : "false";
-        var sb = new StringBuilder(128);
-        sb.Append("[attachment] name=\"").Append(EscapeQuoted(name)).Append('"');
-        sb.Append(" mime=\"").Append(EscapeQuoted(mimeType)).Append('"');
-        sb.Append(" size=").Append(size);
-        sb.Append(" path=\"").Append(EscapeQuoted(relativePath)).Append('"');
-        sb.Append(" inlined=\"").Append(inlinedWire).Append('"');
-        if (!string.IsNullOrEmpty(note))
-            sb.Append(" note=\"").Append(EscapeQuoted(note)).Append('"');
-        return sb.ToString();
-    }
+        => AttachmentLineFormat.BuildAttachmentLine(name, mimeType, size, relativePath, inlined, note);
 
     public static string EscapeQuoted(string value)
-    {
-        var needsProcessing = false;
-        foreach (var c in value)
-        {
-            if (c < ' ' || c == '\\' || c == '"')
-            {
-                needsProcessing = true;
-                break;
-            }
-        }
-
-        if (!needsProcessing)
-            return value;
-
-        var sb = new StringBuilder(value.Length + 8);
-        foreach (var c in value)
-        {
-            if (c < ' ')
-                sb.Append(' ');
-            else if (c == '\\')
-                sb.Append("\\\\");
-            else if (c == '"')
-                sb.Append("\\\"");
-            else
-                sb.Append(c);
-        }
-
-        return sb.ToString();
-    }
+        => AttachmentLineFormat.EscapeQuoted(value);
 
     public static (bool Inlined, string? Note) ResolveInlineDecision(
         MimeType mimeType,

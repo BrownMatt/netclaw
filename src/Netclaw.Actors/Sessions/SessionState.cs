@@ -61,6 +61,16 @@ public sealed record SessionState
     public WorkingContext WorkingContext { get; init; } = WorkingContext.Empty;
 
     /// <summary>
+    /// Uploaded attachments that wait for the next user message. Durable —
+    /// persisted through <see cref="SessionAttachmentStored"/> events and the
+    /// snapshot, so a restart between upload and send loses nothing. The next
+    /// user message embeds every entry once and clears the list through
+    /// <see cref="SessionAttachmentsConsumed"/>.
+    /// </summary>
+    public ImmutableList<PendingSessionAttachment> PendingAttachments { get; init; } =
+        [];
+
+    /// <summary>
     /// In-memory best-effort dedup ledger for reminder-originated turns.
     /// Populated by <see cref="Apply(TurnRecorded)"/> from non-null
     /// <see cref="TurnRecorded.SourceReminderId"/> values and preserved
@@ -145,6 +155,29 @@ public sealed record SessionState
 
     public SessionState Apply(SessionBackgroundJobsReaped evt)
         => MarkAllBackgroundJobsReaped(evt.ReapedAtMs);
+
+    public SessionState Apply(SessionAttachmentStored evt)
+    {
+        if (PendingAttachments.Any(a => string.Equals(a.Id, evt.Attachment.Id, StringComparison.Ordinal)))
+            return this;
+
+        return this with { PendingAttachments = PendingAttachments.Add(evt.Attachment) };
+    }
+
+    public SessionState Apply(SessionAttachmentsConsumed evt)
+    {
+        var consumed = evt.AttachmentIds.ToHashSet(StringComparer.Ordinal);
+        return this with
+        {
+            PendingAttachments = PendingAttachments.RemoveAll(a => consumed.Contains(a.Id))
+        };
+    }
+
+    public SessionState Apply(SessionFolderGrantAdded evt)
+        => this with { WorkingContext = WorkingContext.WithGrantedFolder(evt.Path) };
+
+    public SessionState Apply(SessionFolderGrantRemoved evt)
+        => this with { WorkingContext = WorkingContext.WithoutGrantedFolder(evt.Path) };
 
     public SessionState Apply(AdoptedContextRecorded evt)
     {
@@ -435,6 +468,7 @@ public sealed record SessionState
             TurnCount = TurnCount,
             Title = Title,
             WorkingContext = WorkingContext.IsEmpty ? null : WorkingContext,
+            PendingAttachments = [.. PendingAttachments],
             ActiveBackgroundJobs = [.. ActiveBackgroundJobs.Values],
             AdoptedContextRecords = [.. AdoptedContextRecords.Values
                 .OrderBy(record => record.AuthorizedMessageId, StringComparer.Ordinal)
@@ -495,6 +529,7 @@ public sealed record SessionState
             TurnCount = snapshot.TurnCount,
             Title = snapshot.Title,
             WorkingContext = snapshot.WorkingContext ?? WorkingContext.Empty,
+            PendingAttachments = ImmutableList.CreateRange(snapshot.PendingAttachments),
             ActiveBackgroundJobs = activeJobs,
             AdoptedContextRecords = adoptedContextRecords
         };

@@ -276,6 +276,58 @@ public sealed class SessionRegistry
     }
 
     /// <summary>
+    /// Adds a folder grant to the attached session. The returned task
+    /// completes only after the session actor persisted the grant event —
+    /// the ack-after-persistence contract the GUI relies on for grant chips.
+    /// Throws <see cref="HubException"/> with the session actor's rejection
+    /// reason when validation fails; nothing is persisted in that case.
+    /// </summary>
+    public Task AddFolderGrantAsync(string connectionId, string sessionId, string path, ClaimsPrincipal? principal = null)
+        => SendFolderGrantCommandAsync(
+            connectionId,
+            sessionId,
+            requestedSessionId => new AddFolderGrant { SessionId = requestedSessionId, Path = path });
+
+    /// <summary>
+    /// Removes a folder grant from the attached session. Revocation is
+    /// effective when the returned task completes — the removal event is
+    /// persisted and the next policy evaluation reads the updated list.
+    /// </summary>
+    public Task RemoveFolderGrantAsync(string connectionId, string sessionId, string path, ClaimsPrincipal? principal = null)
+        => SendFolderGrantCommandAsync(
+            connectionId,
+            sessionId,
+            requestedSessionId => new RemoveFolderGrant { SessionId = requestedSessionId, Path = path });
+
+    private async Task SendFolderGrantCommandAsync(
+        string connectionId,
+        string sessionId,
+        Func<SessionId, IWithSessionId> createCommand)
+    {
+        var callerConnectionId = ParseConnectionId(connectionId);
+        var requestedSessionId = ParseSessionId(sessionId);
+
+        if (!_connections.TryGetSessionForConnection(callerConnectionId, out var attachedSessionId)
+            || !attachedSessionId.Equals(requestedSessionId))
+        {
+            throw new HubException($"Session '{sessionId}' is not attached to this connection.");
+        }
+
+        if (!_knownSessions.ContainsKey(attachedSessionId))
+            throw new HubException($"Session '{sessionId}' not found.");
+
+        ThrowIfIngressClosed();
+
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var response = await _pipeline.SendFeedbackAndWaitAsync(
+            createCommand(requestedSessionId),
+            timeout.Token);
+
+        if (response is CommandNack nack)
+            throw new HubException(nack.Reason);
+    }
+
+    /// <summary>
     /// Cleans up session state when a SignalR connection disconnects.
     /// Shuts down the <see cref="SignalRSessionActor"/> so its subscriber is stopped,
     /// triggering <c>WatchWith</c> → <c>LeaveSession</c> on the LLM session actor.

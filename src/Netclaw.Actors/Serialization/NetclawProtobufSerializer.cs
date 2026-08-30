@@ -28,6 +28,10 @@ public sealed class NetclawProtobufSerializer : SerializerWithStringManifest
     private const string SerializableToolCallManifest = "stc-v1";
     private const string TurnRecordedManifest = "tr-v1";
     private const string SessionTitleSetManifest = "sts-v1";
+    private const string SessionFolderGrantAddedManifest = "sfga-v1";
+    private const string SessionFolderGrantRemovedManifest = "sfgr-v1";
+    private const string SessionAttachmentStoredManifest = "satst-v1";
+    private const string SessionAttachmentsConsumedManifest = "satsc-v1";
     private const string SessionCompactedManifest = "sc-v1";
     private const string SessionSnapshotManifest = "ss-v1";
     private const string WorkingContextManifest = "wc-v1";
@@ -56,6 +60,10 @@ public sealed class NetclawProtobufSerializer : SerializerWithStringManifest
         [typeof(SerializableToolCall)] = SerializableToolCallManifest,
         [typeof(TurnRecorded)] = TurnRecordedManifest,
         [typeof(SessionTitleSet)] = SessionTitleSetManifest,
+        [typeof(SessionFolderGrantAdded)] = SessionFolderGrantAddedManifest,
+        [typeof(SessionFolderGrantRemoved)] = SessionFolderGrantRemovedManifest,
+        [typeof(SessionAttachmentStored)] = SessionAttachmentStoredManifest,
+        [typeof(SessionAttachmentsConsumed)] = SessionAttachmentsConsumedManifest,
         [typeof(SessionCompacted)] = SessionCompactedManifest,
         [typeof(SessionSnapshot)] = SessionSnapshotManifest,
         [typeof(WorkingContext)] = WorkingContextManifest,
@@ -114,6 +122,14 @@ public sealed class NetclawProtobufSerializer : SerializerWithStringManifest
                 Proto.TurnRecordedProto.Parser.ParseFrom(bytes)),
             SessionTitleSetManifest => NetclawProtoMapper.FromProto(
                 Proto.SessionTitleSetProto.Parser.ParseFrom(bytes)),
+            SessionFolderGrantAddedManifest => NetclawProtoMapper.FromProto(
+                Proto.SessionFolderGrantAddedProto.Parser.ParseFrom(bytes)),
+            SessionFolderGrantRemovedManifest => NetclawProtoMapper.FromProto(
+                Proto.SessionFolderGrantRemovedProto.Parser.ParseFrom(bytes)),
+            SessionAttachmentStoredManifest => NetclawProtoMapper.FromProto(
+                Proto.SessionAttachmentStoredProto.Parser.ParseFrom(bytes)),
+            SessionAttachmentsConsumedManifest => NetclawProtoMapper.FromProto(
+                Proto.SessionAttachmentsConsumedProto.Parser.ParseFrom(bytes)),
             SessionCompactedManifest => NetclawProtoMapper.FromProto(
                 Proto.SessionCompactedProto.Parser.ParseFrom(bytes)),
             SessionSnapshotManifest => NetclawProtoMapper.FromProto(

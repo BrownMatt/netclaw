@@ -181,6 +181,26 @@ public static partial class SessionProtocol
     public sealed record SessionTitleOutput(string Title) : SessionOutput;
 
     /// <summary>
+    /// A folder grant was added to or removed from the session.
+    /// Lifecycle — always delivered regardless of <see cref="OutputFilter"/>,
+    /// so attached clients can keep grant chips current.
+    /// </summary>
+    public sealed record FolderGrantOutput : SessionOutput
+    {
+        /// <summary>Normalized absolute path of the grant that changed.</summary>
+        public required string Path { get; init; }
+
+        /// <summary>True when the grant was added; false when removed.</summary>
+        public required bool IsGranted { get; init; }
+
+        /// <summary>
+        /// The session's complete grant list after the change, so clients
+        /// can reconcile instead of replaying individual changes.
+        /// </summary>
+        public IReadOnlyList<string> GrantedFolders { get; init; } = [];
+    }
+
+    /// <summary>
     /// Classifies the source of an <see cref="ErrorOutput"/> for structured
     /// diagnostics and Slack fallback messages.
     /// </summary>

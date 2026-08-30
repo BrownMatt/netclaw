@@ -151,6 +151,26 @@ public sealed class ScopedShellSafeVerbPolicyTests : IDisposable
     }
 
     [Fact]
+    public void Folder_grant_does_not_join_the_safe_space_root_set()
+    {
+        // A folder grant widens FILE-TOOL authority only. The shell approval
+        // safe space stays session_dir + declared project_dir — a safe verb
+        // under a granted root must still route to the approval prompt.
+        var policy = new ScopedShellSafeVerbPolicy(VerbList("grep"));
+        var ctx = TestToolExecutionContext.CreateBound("session-1", _sessionDir, new TestToolExecutionContextOptions
+        {
+            Audience = TrustAudience.Personal,
+            GrantedFolders = [_outsideDir]
+        }).Invocation;
+
+        // Control: the session directory itself still short-circuits.
+        Assert.True(ShortCircuits(policy, "grep", _sessionDir, ctx));
+
+        // The granted root does not.
+        Assert.False(ShortCircuits(policy, "grep", _outsideDir, ctx));
+    }
+
+    [Fact]
     public void Mutating_verb_in_safe_space_falls_through_to_prompt()
     {
         // The verb list deliberately omits "git push"; even with cwd inside

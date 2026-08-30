@@ -29,6 +29,8 @@ namespace Netclaw.Daemon.Gateway;
 ///   AttachSession(sessionId: string) → void
 ///   SendMessage(sessionId: string, text: string) → void
 ///   RespondToInteraction(sessionId: string, callId: string, selectedKey: string) → void
+///   AddFolderGrant(sessionId: string, path: string) → void (throws HubException on rejection)
+///   RemoveFolderGrant(sessionId: string, path: string) → void (throws HubException on rejection)
 ///   GeneratePairingCode() → PairingCodeResultDto (loopback Operator only)
 ///
 /// Server → Client:
@@ -78,6 +80,26 @@ public sealed class SessionHub : Hub<ISessionHubClient>
     public Task RespondToInteraction(string sessionId, string callId, string selectedKey)
     {
         return _registry.RespondToInteractionAsync(Context.ConnectionId, sessionId, callId, selectedKey, Context.User);
+    }
+
+    /// <summary>
+    /// Grants the attached session file-tool access to one folder tree.
+    /// Completes after the grant event is persisted; throws
+    /// <see cref="HubException"/> with the rejection reason when the path
+    /// fails validation. Attached clients receive a <c>folder_grant</c>
+    /// output event so grant chips update live.
+    /// </summary>
+    public Task AddFolderGrant(string sessionId, string path)
+    {
+        return _registry.AddFolderGrantAsync(Context.ConnectionId, sessionId, path, Context.User);
+    }
+
+    /// <summary>
+    /// Removes a folder grant. Revocation is immediate once this completes.
+    /// </summary>
+    public Task RemoveFolderGrant(string sessionId, string path)
+    {
+        return _registry.RemoveFolderGrantAsync(Context.ConnectionId, sessionId, path, Context.User);
     }
 
     /// <summary>

@@ -34,6 +34,14 @@ public sealed class DaemonApi
     public const string DefaultEndpoint = "http://127.0.0.1:5199";
 
     public DaemonApi(IHttpClientFactory factory, IConfiguration configuration, NetclawPaths paths)
+        : this(factory, paths)
+    {
+    }
+
+    /// <summary>
+    /// Hostless composition (GUI): endpoint resolution needs only the paths.
+    /// </summary>
+    public DaemonApi(IHttpClientFactory factory, NetclawPaths paths)
     {
         _factory = factory;
         _paths = paths;
@@ -110,6 +118,60 @@ public sealed class DaemonApi
         response.EnsureSuccessStatusCode();
         var stream = await response.Content.ReadAsStreamAsync(cts.Token);
         return await JsonSerializer.DeserializeAsync<List<SessionCatalogEntryDto>>(stream, JsonDefaults.Api, cts.Token) ?? [];
+    }
+
+    /// <summary>
+    /// Wire result of a session attachment upload. <c>AttachmentId</c>
+    /// identifies the pending reference; the file rides the session's next
+    /// message once. Note: two operator clients attached to one session can
+    /// interleave uploads and sends.
+    /// </summary>
+    public sealed record SessionAttachmentUploadResultDto(
+        string AttachmentId,
+        string FileName,
+        string RelativePath,
+        string MimeType,
+        long SizeBytes);
+
+    /// <summary>
+    /// Uploads a file bound to <paramref name="sessionId"/>. The daemon
+    /// stores it in the session inbox and embeds it in the next message
+    /// once. Throws <see cref="HttpRequestException"/> with the daemon's
+    /// reason text on rejection (unknown session, oversize, disallowed
+    /// category).
+    /// </summary>
+    public async Task<SessionAttachmentUploadResultDto> UploadSessionAttachmentAsync(
+        string sessionId,
+        string fileName,
+        Stream content,
+        string? contentType = null,
+        CancellationToken ct = default)
+    {
+        using var cts = CreateTimeoutCts(LongTimeout, ct);
+        var client = CreateHttpClient();
+
+        using var form = new MultipartFormDataContent();
+        using var fileContent = new StreamContent(content);
+        if (!string.IsNullOrWhiteSpace(contentType))
+            fileContent.Headers.ContentType = new MediaTypeHeaderValue(contentType);
+        form.Add(fileContent, "file", fileName);
+
+        var url = $"{_endpoint}/api/sessions/attachments?sessionId={Uri.EscapeDataString(sessionId)}";
+        using var response = await client.PostAsync(url, form, cts.Token);
+        if (!response.IsSuccessStatusCode)
+        {
+            var reason = await response.Content.ReadAsStringAsync(cts.Token);
+            throw new HttpRequestException(
+                string.IsNullOrWhiteSpace(reason)
+                    ? $"Attachment upload failed with status {(int)response.StatusCode}."
+                    : reason.Trim().Trim('"'),
+                inner: null,
+                response.StatusCode);
+        }
+
+        var stream = await response.Content.ReadAsStreamAsync(cts.Token);
+        return await JsonSerializer.DeserializeAsync<SessionAttachmentUploadResultDto>(stream, JsonDefaults.Api, cts.Token)
+               ?? throw new HttpRequestException("Attachment upload returned an empty response.");
     }
 
     // ── Stats ─────────────────────────────────────────────────────────

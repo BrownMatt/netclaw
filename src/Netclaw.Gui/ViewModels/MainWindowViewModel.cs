@@ -3,62 +3,88 @@
 //      Copyright (C) 2026 - 2026 Petabridge, LLC <https://petabridge.com>
 // </copyright>
 // -----------------------------------------------------------------------
-using System.Text;
-using Avalonia.Threading;
+using System.Collections.ObjectModel;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using Netclaw.Actors.Protocol;
 using Netclaw.Client;
-using Netclaw.Configuration;
+using Netclaw.Gui.Services;
 using R3;
 using static Netclaw.Actors.Sessions.SessionProtocol;
 
 namespace Netclaw.Gui.ViewModels;
 
 /// <summary>
-/// Walking-skeleton view model: connect to the daemon, ensure one TUI-channel
-/// session, send text, and render the streamed reply. Product UI lands in
-/// Phase 1 of the GUI plan; this class only proves the transport path.
+/// Marshals work onto the UI thread. An interface so viewmodel tests run
+/// callbacks inline without an Avalonia dispatcher.
+/// </summary>
+public interface IUiDispatcher
+{
+    void Post(Action action);
+}
+
+/// <summary>Name chip for an uploaded file that rides the next message.</summary>
+public sealed record PendingAttachmentChip(string AttachmentId, string FileName);
+
+/// <summary>
+/// The application shell: connection lifecycle, the read-only session list,
+/// the attached chat session, queue-and-flush input, and the <c>+</c> flows
+/// (attach file, grant folder). All session-output handling is delegated to
+/// <see cref="ChatSessionViewModel"/>; this class owns routing and transport.
 /// </summary>
 public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
 {
     private static readonly TimeSpan ConnectRetryDelay = TimeSpan.FromSeconds(3);
 
-    private readonly DaemonClient _client;
+    private readonly IDaemonSessionService _service;
+    private readonly IUiDispatcher _dispatcher;
     private readonly string _endpoint;
-    private readonly Queue<string> _pending = new();
-    private readonly StringBuilder _transcript = new();
+    private readonly List<string> _queue = [];
+    private bool _recovering;
     private readonly IDisposable _outputSubscription;
     private readonly IDisposable _connectionSubscription;
-
-    // Start index of the streaming assistant turn inside _transcript. The final
-    // TextOutput snapshot replaces the accumulated deltas from this index.
-    private int _turnStart = -1;
     private bool _sessionEnsured;
 
     [ObservableProperty]
     private string _status = "Connecting...";
 
     [ObservableProperty]
-    private string _outputText = string.Empty;
-
-    [ObservableProperty]
     private string _inputText = string.Empty;
 
-    public MainWindowViewModel()
-    {
-        var paths = new NetclawPaths();
-        _endpoint = DaemonApi.ResolveEndpoint(paths);
-        _client = DaemonClientFactory.Create(_endpoint, paths);
+    [ObservableProperty]
+    private ChatSessionViewModel? _chat;
 
-        _outputSubscription = _client.SessionOutput
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasQueued))]
+    private int _queuedCount;
+
+    public bool HasQueued => QueuedCount > 0;
+
+    [ObservableProperty]
+    private SessionListItemViewModel? _selectedSession;
+
+    public SessionListViewModel SessionList { get; } = new();
+
+    public ObservableCollection<PendingAttachmentChip> PendingAttachments { get; } = [];
+
+    public MainWindowViewModel(IDaemonSessionService service, IUiDispatcher dispatcher, string endpoint)
+    {
+        _service = service;
+        _dispatcher = dispatcher;
+        _endpoint = endpoint;
+
+        _outputSubscription = _service.SessionOutput
             .Subscribe(this, static (output, self) =>
-                Dispatcher.UIThread.Post(() => self.HandleOutput(output)));
-        _connectionSubscription = _client.ConnectionEvents
+                self._dispatcher.Post(() => self.RouteOutput(output)));
+        _connectionSubscription = _service.ConnectionEvents
             .Subscribe(this, static (evt, self) =>
-                Dispatcher.UIThread.Post(() => self.HandleConnectionEvent(evt)));
+                self._dispatcher.Post(() => self.HandleConnectionEvent(evt)));
 
         _ = ConnectLoopAsync();
     }
+
+    /// <summary>The view's ~80 ms timer calls this to flush streamed deltas.</summary>
+    public void FlushStreamingDeltas() => Chat?.FlushStreamingDeltas();
 
     [RelayCommand]
     private async Task SendAsync()
@@ -68,23 +94,96 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
             return;
 
         InputText = string.Empty;
-        AppendLine($"you> {text}");
 
-        if (_client.IsConnected && _sessionEnsured)
+        if (_service.IsConnected && _sessionEnsured)
         {
             await DispatchAsync(text);
             return;
         }
 
-        _pending.Enqueue(text);
-        Status = $"Queued ({_pending.Count}) - waiting for daemon at {_endpoint}";
+        _queue.Add(text);
+        QueuedCount = _queue.Count;
+        Status = $"Queued ({_queue.Count}) - waiting for daemon at {_endpoint}";
+    }
+
+    [RelayCommand]
+    private async Task AttachSessionAsync(SessionListItemViewModel? item)
+    {
+        if (item is null || Chat?.SessionId == item.SessionId)
+            return;
+
+        try
+        {
+            var sessionId = await _service.ResumeSessionAsync(item.SessionId);
+            AdoptSession(sessionId);
+            Status = $"Connected - {_endpoint}";
+            // A queued message (e.g. from a send the daemon rejected) flushes
+            // on re-attach too, not only on transport reconnect.
+            await FlushQueueAsync();
+        }
+        catch (Exception ex)
+        {
+            Status = $"Attach failed: {ex.Message}";
+        }
+    }
+
+    [RelayCommand]
+    private async Task RemoveGrantAsync(string path)
+    {
+        try
+        {
+            await _service.RemoveFolderGrantAsync(path);
+        }
+        catch (Exception ex)
+        {
+            Status = $"Grant removal failed: {ex.Message}";
+        }
+    }
+
+    /// <summary>
+    /// Grants a folder picked by the operator. The chip appears when the
+    /// daemon's <c>folder_grant</c> event echoes back — never optimistically.
+    /// </summary>
+    public async Task AddGrantAsync(string folderPath)
+    {
+        try
+        {
+            await _service.AddFolderGrantAsync(folderPath);
+        }
+        catch (Exception ex)
+        {
+            Status = $"Grant failed: {ex.Message}";
+        }
+    }
+
+    /// <summary>
+    /// Uploads a picked file; it rides the next message once.
+    /// </summary>
+    public async Task AttachFileAsync(string filePath)
+    {
+        if (Chat is null)
+        {
+            Status = "Attach a session before uploading a file.";
+            return;
+        }
+
+        try
+        {
+            await using var stream = File.OpenRead(filePath);
+            var result = await _service.UploadAttachmentAsync(
+                Chat.SessionId, Path.GetFileName(filePath), stream, contentType: null);
+            PendingAttachments.Add(new PendingAttachmentChip(result.AttachmentId, result.FileName));
+        }
+        catch (Exception ex)
+        {
+            Status = $"Upload failed: {ex.Message}";
+        }
     }
 
     public void Dispose()
     {
         _outputSubscription.Dispose();
         _connectionSubscription.Dispose();
-        _ = _client.DisposeAsync();
     }
 
     private async Task ConnectLoopAsync()
@@ -93,17 +192,14 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         {
             try
             {
-                await _client.ConnectAsync();
+                await _service.ConnectAsync();
                 await EnsureSessionAndFlushAsync();
+                await RefreshSessionListAsync();
                 return;
             }
             catch (Exception ex)
             {
-                // Terminal connect failures (daemon down past the retry budget,
-                // 401 with its `netclaw pair` instruction) all surface here.
-                // Keep retrying: the daemon can start, and pairing can be fixed,
-                // while the window stays open.
-                SetStatusThreadSafe($"Disconnected - retrying {_endpoint} ({ex.Message})");
+                _dispatcher.Post(() => Status = $"Disconnected - retrying {_endpoint} ({ex.Message})");
                 await Task.Delay(ConnectRetryDelay);
             }
         }
@@ -111,71 +207,146 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
 
     private async Task EnsureSessionAndFlushAsync()
     {
-        await _client.EnsureSessionAsync(DaemonClient.TuiChannelType);
+        var sessionId = await _service.EnsureSessionAsync();
         _sessionEnsured = true;
-        SetStatusThreadSafe($"Connected - {_endpoint}");
+        _dispatcher.Post(() =>
+        {
+            if (Chat?.SessionId != sessionId)
+                AdoptSession(sessionId);
+            Status = $"Connected - {_endpoint}";
+        });
 
+        await FlushQueueAsync();
+    }
+
+    private async Task FlushQueueAsync()
+    {
         while (true)
         {
             string? next = null;
-            Dispatcher.UIThread.Invoke(() =>
+            var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _dispatcher.Post(() =>
             {
-                if (_pending.Count > 0)
-                    next = _pending.Dequeue();
+                if (_queue.Count > 0)
+                {
+                    next = _queue[0];
+                    _queue.RemoveAt(0);
+                    QueuedCount = _queue.Count;
+                }
+
+                completion.SetResult(true);
             });
+            await completion.Task;
             if (next is null)
                 return;
 
-            await DispatchAsync(next);
+            // A failed dispatch requeued the message at the front — stop
+            // flushing instead of spinning on the same failure.
+            if (!await DispatchAsync(next))
+                return;
         }
     }
 
-    private async Task DispatchAsync(string text)
+    private async Task RefreshSessionListAsync()
     {
         try
         {
-            await _client.SendAsync(text);
+            var entries = await _service.ListSessionsAsync();
+            _dispatcher.Post(() => SessionList.Load(entries));
         }
         catch (Exception ex)
         {
-            SetStatusThreadSafe($"Send failed: {ex.Message}");
-            Dispatcher.UIThread.Invoke(() => _pending.Enqueue(text));
+            // The list refreshes again on the next reconnect; the chat pane
+            // stays fully usable without it. Surface the failure only when
+            // the pane would otherwise be inexplicably blank.
+            _dispatcher.Post(() =>
+            {
+                if (SessionList.Sessions.Count == 0)
+                    Status = $"Session list unavailable: {ex.Message}";
+            });
         }
     }
 
-    private void HandleOutput(SessionOutput output)
+    private void AdoptSession(string sessionId)
     {
-        switch (output)
+        Chat = new ChatSessionViewModel(
+            sessionId,
+            (callId, key) => _service.RespondToInteractionAsync(callId, key));
+        PendingAttachments.Clear();
+    }
+
+    private async Task<bool> DispatchAsync(string text)
+    {
+        try
         {
-            case TextDeltaOutput delta:
-                if (_turnStart < 0)
-                    _turnStart = _transcript.Length;
-                _transcript.Append(delta.Delta);
-                RefreshOutput();
-                break;
-
-            case TextOutput text:
-                // Authoritative snapshot: replace the accumulated deltas.
-                if (_turnStart >= 0)
-                    _transcript.Length = _turnStart;
-                _turnStart = -1;
-                AppendLine(text.Text);
-                break;
-
-            case TurnCompleted:
-                _turnStart = -1;
-                AppendLine(string.Empty);
-                break;
-
-            case ErrorOutput error:
-                _turnStart = -1;
-                AppendLine($"[error] {error.Message}");
-                Status = $"Error - {error.Message}";
-                break;
-
-            default:
-                break;
+            await _service.SendAsync(text);
+            _dispatcher.Post(() =>
+            {
+                Chat?.OnMessageSent(text);
+                // The daemon consumed the pending uploads with this message.
+                PendingAttachments.Clear();
+            });
+            return true;
         }
+        catch (Exception ex)
+        {
+            _dispatcher.Post(() =>
+            {
+                // A failed send returns to the FRONT of the queue so flush
+                // order stays the original send order.
+                Status = $"Send failed: {ex.Message}";
+                _queue.Insert(0, text);
+                QueuedCount = _queue.Count;
+            });
+
+            // One recovery attempt: the daemon may have dropped this
+            // session's registry binding (e.g. another operator client
+            // detached). Re-ensuring re-registers it and flushes the queue.
+            // Guarded so a genuinely dead daemon does not loop — further
+            // retries wait for the next connection event or attach.
+            if (!_recovering)
+            {
+                _recovering = true;
+                try
+                {
+                    await EnsureSessionAndFlushAsync();
+                }
+                catch (Exception recoverEx)
+                {
+                    _dispatcher.Post(() => Status = $"Send failed: {recoverEx.Message}");
+                }
+                finally
+                {
+                    _recovering = false;
+                }
+            }
+
+            return false;
+        }
+    }
+
+    private void RouteOutput(SessionOutput output)
+    {
+        // Live title events update the list for any session.
+        if (output is SessionTitleOutput title)
+            SessionList.ApplyTitle(output.SessionId.Value, title.Title);
+
+        // Everything else renders only for the attached session — a
+        // detached session's events (approvals included) never reach a
+        // card the operator could answer.
+        if (Chat is null || !string.Equals(Chat.SessionId, output.SessionId.Value, StringComparison.Ordinal))
+            return;
+
+        if (output is SessionJoined joined)
+        {
+            Chat.LoadReplay(joined);
+            return;
+        }
+
+        Chat.HandleOutput(output);
+
+        if (output is ErrorOutput error)
+            Status = $"Error - {error.Message}";
     }
 
     private void HandleConnectionEvent(DaemonConnectionEvent evt)
@@ -190,19 +361,11 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
             _ => evt.Message,
         };
 
-        if (evt.State == DaemonConnectionState.Connected && _sessionEnsured && _pending.Count > 0)
-            _ = EnsureSessionAndFlushAsync();
+        if (evt.State == DaemonConnectionState.Connected && _sessionEnsured)
+        {
+            if (_queue.Count > 0)
+                _ = EnsureSessionAndFlushAsync();
+            _ = RefreshSessionListAsync();
+        }
     }
-
-    private void AppendLine(string line)
-    {
-        _transcript.AppendLine(line);
-        RefreshOutput();
-    }
-
-    private void RefreshOutput()
-        => OutputText = _transcript.ToString();
-
-    private void SetStatusThreadSafe(string status)
-        => Dispatcher.UIThread.Post(() => Status = status);
 }

@@ -416,7 +416,9 @@ internal sealed class ScopedFileAccessPolicy
     /// Single source of truth for root resolution — used by both
     /// <see cref="GetRootsForContext"/> and <see cref="TryResolvePath"/>.
     /// Public audience is excluded from global read roots (skills, identity,
-    /// workspaces) — it may only access its session directory.
+    /// workspaces) — it may only access its session directory — and from
+    /// operator folder grants for the same reason: a Public session's
+    /// session-directory-only guarantee stays intact.
     /// </summary>
     private IReadOnlyList<string> ResolveAndMergeRoots(
         ToolFilesystemAccessProfile access,
@@ -428,10 +430,23 @@ internal sealed class ScopedFileAccessPolicy
             .Select(PathUtility.Normalize)
             .ToList();
 
-        if (accessKind == AccessKind.Read && audience != TrustAudience.Public)
+        if (audience != TrustAudience.Public)
         {
-            foreach (var globalRoot in _cachedGlobalReadRoots.Value)
-                roots.Add(globalRoot);
+            if (accessKind == AccessKind.Read)
+            {
+                foreach (var globalRoot in _cachedGlobalReadRoots.Value)
+                    roots.Add(globalRoot);
+            }
+
+            // Operator folder grants authorize read, write, and attach for
+            // first-party file tools. They join the roots AFTER the caller's
+            // path is canonicalized, and the per-root symlink check below the
+            // merge still applies — a symlink that escapes a granted root
+            // fails the check because the canonical path is what is compared.
+            // The hard-deny surface (ToolPathPolicy) is evaluated by the
+            // tools independently of roots, so a grant can never override it.
+            foreach (var granted in context.RunScope.GrantedFolders)
+                roots.Add(PathUtility.Normalize(granted));
         }
 
         return roots.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
@@ -498,6 +513,11 @@ internal sealed class ScopedFileAccessPolicy
 
         if (!string.IsNullOrWhiteSpace(context.ProjectDirectory))
             roots.Add(context.ProjectDirectory);
+
+        // Operator folder grants are session-owned trust like the project
+        // directory, so an autonomous session honors them too.
+        foreach (var granted in context.RunScope.GrantedFolders)
+            roots.Add(granted);
 
         if (accessKind == AccessKind.Read)
             roots.AddRange(_cachedGlobalReadRoots.Value);

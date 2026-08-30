@@ -200,6 +200,34 @@ public sealed class DaemonClient : IAsyncDisposable
         await ack.Task.WaitAsync(cancellationToken);
     }
 
+    /// <summary>
+    /// Grants the attached session file-tool access to one folder tree. The
+    /// task completes only after the daemon persisted the grant; a validation
+    /// rejection surfaces as a <see cref="Microsoft.AspNetCore.SignalR.HubException"/>
+    /// carrying the daemon's reason. Attached clients — this one included —
+    /// receive a <c>folder_grant</c> session output on success.
+    /// </summary>
+    public async Task AddFolderGrantAsync(string path, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+
+        var ack = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await PostAsync(new FolderGrantCommand(path, Add: true, ack, cancellationToken), cancellationToken);
+        await ack.Task.WaitAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// Removes a folder grant. Revocation is effective when the task completes.
+    /// </summary>
+    public async Task RemoveFolderGrantAsync(string path, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+
+        var ack = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await PostAsync(new FolderGrantCommand(path, Add: false, ack, cancellationToken), cancellationToken);
+        await ack.Task.WaitAsync(cancellationToken);
+    }
+
     public async ValueTask DisposeAsync()
     {
         if (_disposed)
@@ -319,6 +347,19 @@ public sealed class DaemonClient : IAsyncDisposable
                 await EnsureConnectedAsync(op.Token);
                 await ReattachIfNeededAsync(op.Token);
                 await InvokeAsync("RespondToInteraction", [RequireSession(), c.CallId, c.SelectedKey], op.Token);
+                c.Ack.TrySetResult();
+                break;
+            }
+
+            case FolderGrantCommand c:
+            {
+                using var op = LinkOperation(c.Token);
+                await EnsureConnectedAsync(op.Token);
+                await ReattachIfNeededAsync(op.Token);
+                await InvokeAsync(
+                    c.Add ? "AddFolderGrant" : "RemoveFolderGrant",
+                    [RequireSession(), c.Path],
+                    op.Token);
                 c.Ack.TrySetResult();
                 break;
             }
@@ -614,6 +655,9 @@ public sealed class DaemonClient : IAsyncDisposable
             case RespondCommand c:
                 c.Ack.TrySetException(ex);
                 break;
+            case FolderGrantCommand c:
+                c.Ack.TrySetException(ex);
+                break;
             case TransportDroppedCommand:
                 // No caller awaits a transport-drop notification.
                 break;
@@ -652,6 +696,12 @@ public sealed class DaemonClient : IAsyncDisposable
     private sealed record RespondCommand(
         string CallId,
         string SelectedKey,
+        TaskCompletionSource Ack,
+        CancellationToken Token) : ClientCommand;
+
+    private sealed record FolderGrantCommand(
+        string Path,
+        bool Add,
         TaskCompletionSource Ack,
         CancellationToken Token) : ClientCommand;
 

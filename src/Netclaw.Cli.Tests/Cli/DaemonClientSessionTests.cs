@@ -82,6 +82,48 @@ public sealed class DaemonClientSessionTests
         Assert.Equal(("call-2", ApprovalOptionKeys.ApproveSession), state.LastInteractionResponse);
     }
 
+    [Fact]
+    public async Task AddFolderGrantAsync_invokes_hub_method()
+    {
+        using var host = await StartFakeHubAsync();
+        var state = host.Services.GetRequiredService<FakeSessionState>();
+
+        await using var client = InMemorySignalRClientFactory.Create(host);
+        await client.CreateSessionAsync(Netclaw.Actors.Channels.ChannelType.Tui, TestContext.Current.CancellationToken);
+
+        await client.AddFolderGrantAsync("/home/user/projects/alpha", TestContext.Current.CancellationToken);
+
+        Assert.Equal(("/home/user/projects/alpha", true), Assert.Single(state.FolderGrantCalls));
+    }
+
+    [Fact]
+    public async Task RemoveFolderGrantAsync_invokes_hub_method()
+    {
+        using var host = await StartFakeHubAsync();
+        var state = host.Services.GetRequiredService<FakeSessionState>();
+
+        await using var client = InMemorySignalRClientFactory.Create(host);
+        await client.CreateSessionAsync(Netclaw.Actors.Channels.ChannelType.Tui, TestContext.Current.CancellationToken);
+
+        await client.RemoveFolderGrantAsync("/home/user/projects/alpha", TestContext.Current.CancellationToken);
+
+        Assert.Equal(("/home/user/projects/alpha", false), Assert.Single(state.FolderGrantCalls));
+    }
+
+    [Fact]
+    public async Task AddFolderGrantAsync_surfaces_daemon_rejection()
+    {
+        using var host = await StartFakeHubAsync();
+
+        await using var client = InMemorySignalRClientFactory.Create(host);
+        await client.CreateSessionAsync(Netclaw.Actors.Channels.ChannelType.Tui, TestContext.Current.CancellationToken);
+
+        var ex = await Assert.ThrowsAsync<HubException>(
+            () => client.AddFolderGrantAsync("/rejected/path", TestContext.Current.CancellationToken));
+
+        Assert.Contains("not a directory", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
     private static async Task<IHost> StartFakeHubAsync()
     {
         var builder = WebApplication.CreateBuilder();
@@ -102,6 +144,8 @@ public sealed class DaemonClientSessionTests
         private readonly HashSet<string> _sessions = [];
         private readonly Dictionary<string, string> _connectionSessions = [];
         public (string CallId, string SelectedKey)? LastInteractionResponse { get; private set; }
+
+        public List<(string Path, bool Added)> FolderGrantCalls { get; } = [];
 
         public SessionEnsureResultDto Ensure(string connectionId, string? sessionId)
         {
@@ -129,6 +173,14 @@ public sealed class DaemonClientSessionTests
             lock (_gate)
             {
                 LastInteractionResponse = (callId, selectedKey);
+            }
+        }
+
+        public void RecordFolderGrant(string path, bool added)
+        {
+            lock (_gate)
+            {
+                FolderGrantCalls.Add((path, added));
             }
         }
 
@@ -181,6 +233,24 @@ public sealed class DaemonClientSessionTests
                 throw new HubException("session not attached");
 
             _state.RecordInteractionResponse(callId, selectedKey);
+            return Task.CompletedTask;
+        }
+
+        public Task AddFolderGrant(string sessionId, string path)
+            => HandleFolderGrant(sessionId, path, added: true);
+
+        public Task RemoveFolderGrant(string sessionId, string path)
+            => HandleFolderGrant(sessionId, path, added: false);
+
+        private Task HandleFolderGrant(string sessionId, string path, bool added)
+        {
+            if (!_state.IsAttached(Context.ConnectionId, sessionId))
+                throw new HubException("session not attached");
+
+            if (path.StartsWith("/rejected", StringComparison.Ordinal))
+                throw new HubException("Grant path does not exist or is not a directory.");
+
+            _state.RecordFolderGrant(path, added);
             return Task.CompletedTask;
         }
 

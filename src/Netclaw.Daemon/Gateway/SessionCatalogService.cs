@@ -233,6 +233,40 @@ public sealed class SessionCatalogService : ISessionLifecycleObserver
     }
 
     /// <summary>
+    /// Returns true when the catalog knows the given session. The catalog
+    /// row is inserted at session activation, so any attachable session is
+    /// present. Used by the attachment upload endpoint to reject unknown
+    /// session ids before storing anything.
+    /// </summary>
+    public bool SessionExists(string persistenceId)
+    {
+        if (string.IsNullOrWhiteSpace(persistenceId))
+            return false;
+
+        try
+        {
+            using var conn = new SqliteConnection(_connectionString);
+            conn.Open();
+
+            EnsureSchemaUpToDate(conn, _logger);
+
+            // Catalog rows key on the journal persistence id
+            // ("session-{sessionId}"); accept the raw session id here.
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT 1 FROM sessions WHERE persistence_id = $id LIMIT 1";
+            cmd.Parameters.AddWithValue("$id", $"session-{persistenceId}");
+            return cmd.ExecuteScalar() is not null;
+        }
+        catch (Exception ex)
+        {
+            // Fail closed: an unreadable catalog must not let uploads through
+            // for arbitrary session ids.
+            _logger.LogWarning(ex, "Failed to check session existence for {SessionId}", persistenceId);
+            return false;
+        }
+    }
+
+    /// <summary>
     /// List recent sessions, ordered by last activity descending.
     /// </summary>
     public List<SessionCatalogEntry> ListRecent(int limit = 50, int offset = 0)

@@ -55,6 +55,28 @@ public sealed class DaemonClientMappingTests
     }
 
     [Fact]
+    public void FromDto_maps_folder_grant_output()
+    {
+        var dto = new SessionOutputDto
+        {
+            Type = "folder_grant",
+            SessionId = "signalr/test",
+            TimestampMs = 123,
+            GrantPath = "/home/user/projects/alpha",
+            IsGranted = true,
+            GrantedFolders = ["/home/user/projects/alpha"]
+        };
+
+        var output = DaemonClient.FromDto(dto);
+
+        var grant = Assert.IsType<FolderGrantOutput>(output);
+        Assert.Equal("signalr/test", grant.SessionId.Value);
+        Assert.Equal("/home/user/projects/alpha", grant.Path);
+        Assert.True(grant.IsGranted);
+        Assert.Equal(["/home/user/projects/alpha"], grant.GrantedFolders);
+    }
+
+    [Fact]
     public void FromDto_maps_tool_result_output()
     {
         var dto = new SessionOutputDto

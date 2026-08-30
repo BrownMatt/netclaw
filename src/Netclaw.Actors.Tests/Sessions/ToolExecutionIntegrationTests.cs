@@ -453,6 +453,13 @@ internal sealed class FakeToolExecutor : IToolExecutor
 
     public Dictionary<string, ToolInvocationReceipt> Receipts { get; } = [];
 
+    /// <summary>
+    /// Granted-folder snapshot from each executed call's run scope, in
+    /// execution order. Lets grant tests prove the runtime tool context
+    /// carries the session's persisted grant list.
+    /// </summary>
+    public List<IReadOnlyList<string>> ObservedGrantedFolders { get; } = [];
+
     public Dictionary<string, ToolAgentCorrection> Corrections { get; } = [];
 
     public Action? BeforeCorrection { get; set; }
@@ -477,6 +484,10 @@ internal sealed class FakeToolExecutor : IToolExecutor
     public async Task<string> ExecuteAsync(FunctionCallContent toolCall, Netclaw.Tools.ToolExecutionContext context, CancellationToken ct = default)
     {
         Interlocked.Increment(ref _callCount);
+        lock (ObservedGrantedFolders)
+        {
+            ObservedGrantedFolders.Add([.. context.RunScope.GrantedFolders]);
+        }
 
         if (Corrections.TryGetValue(toolCall.Name, out var correction))
         {

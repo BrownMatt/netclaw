@@ -320,6 +320,7 @@ public abstract record ToolSessionScope
 public sealed record ToolRunScope
 {
     private IReadOnlyList<string> _recentFiles = [];
+    private IReadOnlyList<string> _grantedFolders = [];
 
     public required ToolSessionScope Session { get; init; }
     public required TrustAudience Audience { get; init; }
@@ -340,6 +341,23 @@ public sealed record ToolRunScope
         {
             ArgumentNullException.ThrowIfNull(value);
             _recentFiles = Array.AsReadOnly(value.ToArray());
+        }
+    }
+
+    /// <summary>
+    /// Operator-granted folder roots mirrored from
+    /// <c>WorkingContext.GrantedFolders</c> at context-build time. Consumed
+    /// by the file access policy as additional authorized roots for
+    /// first-party file tools. Never consumed by the shell approval
+    /// safe-space computation.
+    /// </summary>
+    public IReadOnlyList<string> GrantedFolders
+    {
+        get => _grantedFolders;
+        init
+        {
+            ArgumentNullException.ThrowIfNull(value);
+            _grantedFolders = Array.AsReadOnly(value.ToArray());
         }
     }
 }
@@ -604,6 +622,12 @@ public sealed class ToolInvocationContext
     /// grounding for delegated work and does not grant filesystem authority.
     /// </summary>
     public IReadOnlyList<string> RecentFiles => RunScope.RecentFiles;
+
+    /// <summary>
+    /// Operator-granted folder roots for this session. See
+    /// <see cref="ToolRunScope.GrantedFolders"/>.
+    /// </summary>
+    public IReadOnlyList<string> GrantedFolders => RunScope.GrantedFolders;
 
     /// <summary>
     /// Resolves the working directory for a shell-style invocation. Returns

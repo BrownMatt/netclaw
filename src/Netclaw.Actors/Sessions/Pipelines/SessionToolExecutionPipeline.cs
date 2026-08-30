@@ -191,6 +191,7 @@ internal abstract record BackgroundJobDispatch
 internal sealed class SessionToolRunEnvironment
 {
     private IReadOnlyList<string> _recentFiles = [];
+    private IReadOnlyList<string> _grantedFolders = [];
 
     public required string SessionDirectory { get; init; }
     public required InlineOutputBudget InlineOutputBudget { get; init; }
@@ -204,6 +205,16 @@ internal sealed class SessionToolRunEnvironment
         {
             ArgumentNullException.ThrowIfNull(value);
             _recentFiles = Array.AsReadOnly(value.ToArray());
+        }
+    }
+
+    public IReadOnlyList<string> GrantedFolders
+    {
+        get => _grantedFolders;
+        init
+        {
+            ArgumentNullException.ThrowIfNull(value);
+            _grantedFolders = Array.AsReadOnly(value.ToArray());
         }
     }
 }
@@ -248,7 +259,8 @@ internal sealed class SessionToolBatch
             ModelInputModalities = environment.ModelInputModalities,
             SpawnChildActor = environment.SpawnChildActor,
             ProjectDirectory = environment.ProjectDirectory,
-            RecentFiles = environment.RecentFiles
+            RecentFiles = environment.RecentFiles,
+            GrantedFolders = environment.GrantedFolders
         };
     }
 

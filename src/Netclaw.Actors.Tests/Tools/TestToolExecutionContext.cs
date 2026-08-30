@@ -60,6 +60,7 @@ internal static class TestToolExecutionContext
             ProjectDirectory = options.ProjectDirectory,
             InheritedCwd = options.InheritedCwd,
             RecentFiles = options.RecentFiles,
+            GrantedFolders = options.GrantedFolders,
         }, options.ExecutionTimeout, outputs);
 
         if (options.Cwd is not null)
@@ -84,6 +85,7 @@ internal sealed record TestToolExecutionContextOptions
     public string? ProjectDirectory { get; init; }
     public string? InheritedCwd { get; init; }
     public IReadOnlyList<string> RecentFiles { get; init; } = [];
+    public IReadOnlyList<string> GrantedFolders { get; init; } = [];
     public ToolExecutionTimeout ExecutionTimeout { get; init; } = ToolExecutionTimeout.Default;
     public string? Cwd { get; init; }
     public Action<SubAgentNotificationInfo>? SubAgentActivitySink { get; init; }

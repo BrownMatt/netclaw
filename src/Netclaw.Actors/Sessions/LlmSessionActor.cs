@@ -22,6 +22,7 @@ using Netclaw.Actors.Sessions.Handlers;
 using Netclaw.Actors.Sessions.Pipelines;
 using Netclaw.Actors.Text;
 using Netclaw.Configuration;
+using Netclaw.Media;
 using Netclaw.Actors.Tools;
 using Netclaw.Security;
 using Netclaw.Tools;
@@ -290,6 +291,10 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
             ClearActiveToolBatchTracking();
         });
         Recover<SessionTitleSet>(evt => _state = _state.Apply(evt));
+        Recover<SessionFolderGrantAdded>(evt => _state = _state.Apply(evt));
+        Recover<SessionFolderGrantRemoved>(evt => _state = _state.Apply(evt));
+        Recover<SessionAttachmentStored>(evt => _state = _state.Apply(evt));
+        Recover<SessionAttachmentsConsumed>(evt => _state = _state.Apply(evt));
         Recover<SessionBackgroundJobsReaped>(evt => _state = _state.Apply(evt));
         Recover<SessionCompacted>(evt =>
         {
@@ -2131,7 +2136,8 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
             ModelInputModalities = _model.InputModalities,
             SpawnChildActor = spawnChildActor,
             ProjectDirectory = _state.WorkingContext.ProjectDirectory,
-            RecentFiles = _state.WorkingContext.RecentFiles
+            RecentFiles = _state.WorkingContext.RecentFiles,
+            GrantedFolders = _state.WorkingContext.GrantedFolders
         };
         var pipeline = _toolExecutionPipeline
             ?? throw new InvalidOperationException("Tool batch dispatch requires tool execution infrastructure.");
@@ -2436,12 +2442,153 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
         if (TryHandleSlashCommand(executableUserContent, mediaRefs))
             return;
 
+        // Embed-once: pending uploaded attachments ride this message only.
+        // The consumed event persists before the turn starts, so a replayed
+        // journal never re-embeds them on a later turn.
+        if (!_state.PendingAttachments.IsEmpty)
+        {
+            if (!TryBuildPendingAttachmentEmbed(out var embedLines, out var embedRefs, out var failedAttachment))
+            {
+                RejectTurnForUnreadableAttachment(failedAttachment, cmd.Source);
+                return;
+            }
+
+            var mergedContent = string.IsNullOrEmpty(userContent)
+                ? embedLines
+                : $"{userContent}\n{embedLines}";
+            var mergedRefs = mediaRefs.Concat(embedRefs).ToList();
+            var consumed = new SessionAttachmentsConsumed
+            {
+                SessionId = _sessionId,
+                AttachmentIds = [.. _state.PendingAttachments.Select(a => a.Id)],
+                ConsumedAtMs = NowMs()
+            };
+
+            Persist(consumed, evt =>
+            {
+                _state = _state.Apply(evt);
+                StartTurnWithUserMessage(mergedContent, executableUserContent, mergedRefs);
+            });
+            return;
+        }
+
+        StartTurnWithUserMessage(userContent, executableUserContent, mediaRefs);
+    }
+
+    private void StartTurnWithUserMessage(
+        string userContent,
+        string executableUserContent,
+        IReadOnlyList<SerializableMediaReference> mediaRefs)
+    {
         _state = _state.AddUserMessage(userContent, mediaRefs.Count > 0 ? mediaRefs : null);
         TryReplyAck();
         _recallManager.ResetForNewTurn();
         _compactionOverflowRetryCount = 0;
         FireInitialTurnLlmCall(executableUserContent);
         TransitionTo(SessionPhase.Processing);
+    }
+
+    /// <summary>
+    /// Builds the structural embed for every pending attachment: one
+    /// canonical <c>[attachment]</c> line per file, plus media references
+    /// for images the current model can ingest inline. Fails closed — a
+    /// pending file that cannot be read fails the whole send, so a message
+    /// never reaches the model without its attachment.
+    /// </summary>
+    private bool TryBuildPendingAttachmentEmbed(
+        out string embedLines,
+        out List<SerializableMediaReference> embedRefs,
+        out string failedAttachment)
+    {
+        embedLines = string.Empty;
+        embedRefs = [];
+        failedAttachment = string.Empty;
+
+        var sessionDir = GetSessionDirectory();
+        var lines = new List<string>(_state.PendingAttachments.Count);
+        var inlineImages = _model.InputModalities.HasFlag(ModelModality.Image);
+
+        foreach (var pending in _state.PendingAttachments)
+        {
+            var absolutePath = Path.Combine(sessionDir, pending.RelativePath);
+            if (!File.Exists(absolutePath))
+            {
+                failedAttachment = pending.FileName;
+                return false;
+            }
+
+            var mimeType = new MimeType(pending.MimeType);
+            var category = Enum.TryParse<AttachmentCategory>(pending.Category, ignoreCase: true, out var parsed)
+                ? parsed
+                : AttachmentCategory.Other;
+            var (inlined, note) = AttachmentInlineDecision.Resolve(mimeType, category, inlineImages);
+
+            if (inlined)
+            {
+                byte[] bytes;
+                try
+                {
+                    bytes = File.ReadAllBytes(absolutePath);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    failedAttachment = pending.FileName;
+                    return false;
+                }
+
+                var write = SessionMediaStore.WriteDataContent(
+                    new Microsoft.Extensions.AI.DataContent(bytes, pending.MimeType), sessionDir);
+                if (write.Reference is not null)
+                {
+                    embedRefs.Add(write.Reference);
+                }
+                else
+                {
+                    inlined = false;
+                    note = write.DroppedReason ?? note;
+                }
+            }
+
+            lines.Add(AttachmentLineFormat.BuildAttachmentLine(
+                pending.FileName,
+                pending.MimeType,
+                pending.SizeBytes,
+                pending.RelativePath,
+                inlined,
+                note));
+        }
+
+        embedLines = string.Join("\n", lines);
+        return true;
+    }
+
+    private void RejectTurnForUnreadableAttachment(string attachmentName, MessageSource? source)
+    {
+        var message =
+            $"Attachment '{attachmentName}' could not be read from session storage. " +
+            "The message was not sent to the model. Re-upload the attachment and try again.";
+        var correlationId = Guid.NewGuid();
+
+        _log.Error(
+            "attachment_embed_failed name={FileName} correlationId={CorrelationId}",
+            attachmentName,
+            correlationId);
+
+        EmitOutput(new ErrorOutput
+        {
+            SessionId = _sessionId,
+            Message = message,
+            Category = ErrorCategory.InputCompatibility,
+            CorrelationId = correlationId
+        });
+        EmitOutput(new TurnCompleted
+        {
+            SessionId = _sessionId,
+            TurnNumber = new TurnNumber(_state.TurnCount),
+            Outcome = TurnOutcome.Skipped,
+            SourceReminderId = source?.ReminderId
+        });
+        TryReplyAck();
     }
 
     private bool IsReminderDedupHit(ReminderId? reminderId, bool includeBuffered)
@@ -2612,6 +2759,187 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
                 _log.Info("{Subscriber} left", cmd.Subscriber);
             }
         });
+
+        Command<AddFolderGrant>(HandleAddFolderGrant);
+        Command<RemoveFolderGrant>(HandleRemoveFolderGrant);
+        Command<AddPendingAttachment>(HandleAddPendingAttachment);
+    }
+
+    private void HandleAddPendingAttachment(AddPendingAttachment cmd)
+    {
+        var attachment = cmd.Attachment;
+        if (string.IsNullOrWhiteSpace(attachment.Id)
+            || string.IsNullOrWhiteSpace(attachment.FileName)
+            || string.IsNullOrWhiteSpace(attachment.RelativePath))
+        {
+            TryReplyNack("Attachment reference is incomplete.");
+            return;
+        }
+
+        if (_state.PendingAttachments.Any(a => string.Equals(a.Id, attachment.Id, StringComparison.Ordinal)))
+        {
+            TryReplyNack($"Attachment '{attachment.Id}' is already pending.");
+            return;
+        }
+
+        var evt = new SessionAttachmentStored
+        {
+            SessionId = _sessionId,
+            Attachment = attachment
+        };
+
+        Persist(evt, e =>
+        {
+            _state = _state.Apply(e);
+            TurnLog().Info(
+                "attachment_pending name={FileName} mime={Mime} size={Size}",
+                e.Attachment.FileName, e.Attachment.MimeType, e.Attachment.SizeBytes);
+            TryReplyAck();
+        });
+    }
+
+    private void HandleAddFolderGrant(AddFolderGrant cmd)
+    {
+        // Security boundary: a grant widens file-tool authority for this
+        // session. Validate before persistence — an invalid path must leave
+        // the persisted grant list unchanged.
+        if (!TryValidateGrantPath(cmd.Path, requireExistingDirectory: true, out var normalized, out var reason))
+        {
+            TryReplyNack(reason);
+            return;
+        }
+
+        if (_state.WorkingContext.GrantedFolders.Contains(normalized, StringComparer.Ordinal))
+        {
+            TryReplyNack($"Folder is already granted: {normalized}");
+            return;
+        }
+
+        var evt = new SessionFolderGrantAdded
+        {
+            SessionId = _sessionId,
+            Path = normalized,
+            GrantedAtMs = NowMs()
+        };
+
+        Persist(evt, e =>
+        {
+            _state = _state.Apply(e);
+            _log.Info("Folder grant added: {Path}", e.Path);
+            TryReplyAck();
+            EmitFolderGrantOutput(e.Path, isGranted: true);
+        });
+    }
+
+    private void HandleRemoveFolderGrant(RemoveFolderGrant cmd)
+    {
+        // The directory may have been deleted since the grant, so removal
+        // validates shape only — never existence.
+        if (!TryValidateGrantPath(cmd.Path, requireExistingDirectory: false, out var normalized, out var reason))
+        {
+            TryReplyNack(reason);
+            return;
+        }
+
+        if (!_state.WorkingContext.GrantedFolders.Contains(normalized, StringComparer.Ordinal))
+        {
+            TryReplyNack($"Folder is not granted: {normalized}");
+            return;
+        }
+
+        var evt = new SessionFolderGrantRemoved
+        {
+            SessionId = _sessionId,
+            Path = normalized,
+            RemovedAtMs = NowMs()
+        };
+
+        Persist(evt, e =>
+        {
+            _state = _state.Apply(e);
+            _log.Info("Folder grant removed: {Path}", e.Path);
+            TryReplyAck();
+            EmitFolderGrantOutput(e.Path, isGranted: false);
+        });
+    }
+
+    private void EmitFolderGrantOutput(string path, bool isGranted)
+        => EmitOutput(new FolderGrantOutput
+        {
+            SessionId = _sessionId,
+            Path = path,
+            IsGranted = isGranted,
+            GrantedFolders = [.. _state.WorkingContext.GrantedFolders]
+        });
+
+    private static bool TryValidateGrantPath(
+        string rawPath,
+        bool requireExistingDirectory,
+        out string normalized,
+        out string reason)
+    {
+        normalized = string.Empty;
+
+        if (string.IsNullOrWhiteSpace(rawPath))
+        {
+            reason = "Grant path is required.";
+            return false;
+        }
+
+        if (rawPath.Any(char.IsControl))
+        {
+            reason = "Grant path contains control characters.";
+            return false;
+        }
+
+        if (!Path.IsPathFullyQualified(rawPath))
+        {
+            reason = "Grant path must be an absolute directory path.";
+            return false;
+        }
+
+        try
+        {
+            normalized = Path.GetFullPath(rawPath);
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            reason = $"Grant path is invalid: {ex.Message}";
+            return false;
+        }
+
+        if (!requireExistingDirectory)
+        {
+            reason = string.Empty;
+            return true;
+        }
+
+        if (!Directory.Exists(normalized))
+        {
+            reason = "Grant path does not exist or is not a directory.";
+            return false;
+        }
+
+        try
+        {
+            // A symlinked grant root would let the granted subtree resolve
+            // somewhere the operator did not point at. Refuse it up front —
+            // the policy's canonicalization would deny access later anyway,
+            // which would make the grant a silent no-op.
+            if ((File.GetAttributes(normalized) & FileAttributes.ReparsePoint) != 0)
+            {
+                reason = "Grant path is a filesystem link; grant the link target instead.";
+                return false;
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            reason = $"Grant path could not be inspected: {ex.Message}";
+            return false;
+        }
+
+        reason = string.Empty;
+        return true;
     }
 
     private void CommandSnapshotMessages()
@@ -3394,6 +3722,7 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
                               ?? (_currentTurnSource is null ? null : _currentTurnSource.ChannelType.ToWireValue()),
                 ProjectDirectory = _state.WorkingContext.ProjectDirectory,
                 RecentFiles = _state.WorkingContext.RecentFiles,
+                GrantedFolders = _state.WorkingContext.GrantedFolders,
                 InteractiveApproval = new InteractiveApprovalCapability.Unavailable(),
                 SpawnChildActor = spawnChildActor,
             }, new ToolExecutionTimeout(_config.ToolExecutionTimeout), outputs);
