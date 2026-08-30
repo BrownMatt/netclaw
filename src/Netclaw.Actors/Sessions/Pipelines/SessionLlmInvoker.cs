@@ -25,6 +25,7 @@ internal static class SessionLlmInvoker
         IActorRef self,
         long callId,
         SessionId sessionId,
+        int thinkingCapChars,
         CancellationToken cancellationToken)
     {
         // Set session affinity so the HTTP-layer DelegatingHandler adds an
@@ -35,7 +36,7 @@ internal static class SessionLlmInvoker
         SessionAffinityContext.SessionId = sessionId.Value;
         try
         {
-            var response = await StreamAsync(client, messages, options, self, callId, cancellationToken);
+            var response = await StreamAsync(client, messages, options, self, callId, thinkingCapChars, cancellationToken);
             self.Tell(response);
         }
         catch (OperationCanceledException ex)
@@ -61,6 +62,7 @@ internal static class SessionLlmInvoker
         ChatOptions? options,
         IActorRef self,
         long callId,
+        int thinkingCapChars,
         CancellationToken cancellationToken)
     {
         // Per-content dispatch + the buffered-first-delta trick are session-specific
@@ -143,6 +145,7 @@ internal static class SessionLlmInvoker
                     self.Tell(new LlmResponseDeltaReceived(EmptyTextContent) { CallId = callId, Substantive = substantive });
                 }
             },
+            thinkingCapChars,
             cancellationToken);
 
         return new LlmResponseReceived
@@ -151,7 +154,9 @@ internal static class SessionLlmInvoker
             StreamedText = result.Diagnostics.TextDeltaCount > 1,
             StreamedThinking = result.Diagnostics.ThinkingDeltaCount > 1,
             RecallResult = null,
-            CallId = callId
+            CallId = callId,
+            ThinkingCapBreached = result.ThinkingCapBreached,
+            ThinkingDeltaCount = result.Diagnostics.ThinkingDeltaCount
         };
     }
 }

@@ -52,6 +52,59 @@ public sealed class SessionConfigDefaultsTests
     }
 
     [Fact]
+    public void Loop_quality_guards_default_to_nudge_and_cap_on_reprompt_off()
+    {
+        var config = new SessionConfig();
+        Assert.True(config.ToolErrorNudgeEnabled);
+        Assert.True(config.ThinkingCapEnabled);
+        Assert.Equal(120_000, config.ThinkingCapChars);
+        Assert.False(config.PlanRepromptEnabled);
+    }
+
+    [Fact]
+    public void BindFromConfiguration_old_config_shape_yields_loop_quality_defaults()
+    {
+        // A pre-guard config (no loop-quality keys) must load with the same
+        // defaults the schema declares — the load/round-trip proof required
+        // by the Automation Floor for config paradigm changes.
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Session:MaxToolIterationsPerTurn"] = "40"
+            })
+            .Build();
+
+        var bound = SessionConfig.BindFromConfiguration(config.GetSection("Session"));
+
+        Assert.Equal(40, bound.MaxToolIterationsPerTurn);
+        Assert.True(bound.ToolErrorNudgeEnabled);
+        Assert.True(bound.ThinkingCapEnabled);
+        Assert.Equal(120_000, bound.ThinkingCapChars);
+        Assert.False(bound.PlanRepromptEnabled);
+    }
+
+    [Fact]
+    public void BindFromConfiguration_binds_explicit_loop_quality_values()
+    {
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Session:ToolErrorNudgeEnabled"] = "false",
+                ["Session:ThinkingCapEnabled"] = "false",
+                ["Session:ThinkingCapChars"] = "60000",
+                ["Session:PlanRepromptEnabled"] = "true"
+            })
+            .Build();
+
+        var bound = SessionConfig.BindFromConfiguration(config.GetSection("Session"));
+
+        Assert.False(bound.ToolErrorNudgeEnabled);
+        Assert.False(bound.ThinkingCapEnabled);
+        Assert.Equal(60_000, bound.ThinkingCapChars);
+        Assert.True(bound.PlanRepromptEnabled);
+    }
+
+    [Fact]
     public void BindFromConfiguration_supports_legacy_root_level_tuning_keys()
     {
         var config = new ConfigurationBuilder()

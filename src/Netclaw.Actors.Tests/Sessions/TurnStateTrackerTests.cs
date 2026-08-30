@@ -25,6 +25,58 @@ public sealed class TurnStateTrackerTests
         AfterToolUse,
     }
 
+    [Fact]
+    public void ToolErrors_ProduceOneNudge()
+    {
+        var tracker = new TurnStateTracker();
+
+        var nudge = tracker.EvaluateToolErrors(["browser_navigate", "browser_navigate", "web_fetch"]);
+
+        Assert.NotNull(nudge);
+        // Distinct tool names, one nudge for the whole iteration.
+        Assert.Equal(["browser_navigate", "web_fetch"], nudge.ToolNames);
+        Assert.Contains("Do not retry the same tool with identical arguments", nudge.NudgeText);
+    }
+
+    [Fact]
+    public void ToolErrors_NoErrors_NoNudge()
+    {
+        var tracker = new TurnStateTracker();
+
+        Assert.Null(tracker.EvaluateToolErrors([]));
+    }
+
+    [Fact]
+    public void ToolErrors_SuppressedForToolWithFiredDuplicateGuard()
+    {
+        var tracker = new TurnStateTracker();
+        for (var i = 0; i < 3; i++)
+            tracker.TrackToolCall("browser_navigate", "{\"url\":\"x\"}");
+        Assert.NotNull(tracker.CheckForDuplicates());
+
+        // Same tool errors again: the duplicate nudge already scolded it.
+        Assert.Null(tracker.EvaluateToolErrors(["browser_navigate"]));
+
+        // A different tool's error still nudges.
+        var other = tracker.EvaluateToolErrors(["web_fetch"]);
+        Assert.NotNull(other);
+        Assert.Equal(["web_fetch"], other.ToolNames);
+    }
+
+    [Fact]
+    public void ToolErrors_DuplicateSuppressionResetsWithTurn()
+    {
+        var tracker = new TurnStateTracker();
+        for (var i = 0; i < 3; i++)
+            tracker.TrackToolCall("browser_navigate", "{}");
+        Assert.NotNull(tracker.CheckForDuplicates());
+        Assert.Null(tracker.EvaluateToolErrors(["browser_navigate"]));
+
+        tracker.ResetForNewTurn();
+
+        Assert.NotNull(tracker.EvaluateToolErrors(["browser_navigate"]));
+    }
+
     [Theory]
     [InlineData(ToolPhase.AfterToolUse, LlmResponseKind.ThinkingOnly)]
     [InlineData(ToolPhase.AfterToolUse, LlmResponseKind.Empty)]

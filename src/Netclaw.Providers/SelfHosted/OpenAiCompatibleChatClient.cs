@@ -188,6 +188,10 @@ public sealed class OpenAiCompatibleChatClient : IChatClient
             var textToolCalls = TextToolCallParser.ExtractFromText(accumulatedText.ToString());
             if (textToolCalls.Count > 0)
             {
+                _logger.LogDebug(
+                    "Promoted {Count} text tool call(s) from suppressed stream text (model {ModelId})",
+                    textToolCalls.Count, _modelId);
+
                 // Emit any cleaned non-tool-call text that was suppressed
                 var cleaned = ToolCallTextFilter.GetCleanedText(accumulatedText);
                 if (!string.IsNullOrWhiteSpace(cleaned))
@@ -200,6 +204,16 @@ public sealed class OpenAiCompatibleChatClient : IChatClient
                     FinishReason = ChatFinishReason.ToolCalls
                 };
             }
+            else
+            {
+                // Phase 0 telemetry (docs/netclaw/plans/improve-tool-calling.md):
+                // the suppressor held tool markup, but the parser promoted no call.
+                // The held text is dropped — the exact miss this warning counts.
+                // The miss rate per model decides the Phase 2 format priorities.
+                _logger.LogWarning(
+                    "Text tool-call promotion failed: stream suppressor was active but no calls parsed; suppressed text dropped (model {ModelId}, {Chars} chars). Head: {Head}",
+                    _modelId, accumulatedText.Length, TelemetryHead(accumulatedText.ToString()));
+            }
         }
         // Original fallback for non-filtered text tool calls
         else if (!hadStructuredToolCalls
@@ -210,12 +224,24 @@ public sealed class OpenAiCompatibleChatClient : IChatClient
             var textToolCalls = TextToolCallParser.ExtractFromText(accumulatedText.ToString());
             if (textToolCalls.Count > 0)
             {
+                _logger.LogDebug(
+                    "Promoted {Count} text tool call(s) from unsuppressed stream text (model {ModelId})",
+                    textToolCalls.Count, _modelId);
+
                 yield return new ChatResponseUpdate(ChatRole.Assistant, [.. textToolCalls.Cast<AIContent>()])
                 {
                     FinishReason = ChatFinishReason.ToolCalls
                 };
             }
         }
+    }
+
+    // Phase 0 tool-call telemetry: first 120 chars of the model text, newlines
+    // flattened so the warning stays a one-line, greppable log record.
+    private static string TelemetryHead(string text)
+    {
+        var flat = text.ReplaceLineEndings(" ");
+        return flat.Length <= 120 ? flat : flat[..120];
     }
 
     public object? GetService(Type serviceType, object? serviceKey = null) => null;
@@ -687,7 +713,9 @@ public sealed class OpenAiCompatibleChatClient : IChatClient
         };
     }
 
-    private static ChatResponse ParseChatResponse(JsonElement root)
+    // Instance method (not static): Phase 0 tool-call telemetry needs _logger
+    // and _modelId (docs/netclaw/plans/improve-tool-calling.md).
+    private ChatResponse ParseChatResponse(JsonElement root)
     {
         var choice = root.GetProperty("choices")[0];
         var message = choice.GetProperty("message");
@@ -713,12 +741,26 @@ public sealed class OpenAiCompatibleChatClient : IChatClient
             var textToolCalls = TextToolCallParser.ExtractFromText(textContent);
             if (textToolCalls.Count > 0)
             {
+                _logger.LogDebug(
+                    "Promoted {Count} text tool call(s) from non-streaming response text (model {ModelId})",
+                    textToolCalls.Count, _modelId);
+
                 contents.RemoveAll(c => c is TextContent);
                 var cleaned = TextToolCallParser.StripToolCallText(textContent!);
                 if (!string.IsNullOrWhiteSpace(cleaned))
                     contents.Add(new TextContent(cleaned));
                 contents.AddRange(textToolCalls);
                 finishReason = ChatFinishReason.ToolCalls;
+            }
+            else if (textContent is not null
+                && textContent.Contains("<tool_call", StringComparison.Ordinal))
+            {
+                // Phase 0 telemetry: markup is present but nothing promoted. The
+                // non-streaming path keeps the text, so the markup leaks to the
+                // session as prose instead of a call — still a miss to count.
+                _logger.LogWarning(
+                    "Text tool-call promotion failed: response contains tool markup but no calls parsed; markup leaks as prose (model {ModelId}, {Chars} chars). Head: {Head}",
+                    _modelId, textContent.Length, TelemetryHead(textContent));
             }
         }
 

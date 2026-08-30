@@ -32,7 +32,7 @@ public sealed class SqliteProvisioningDoctorCheck(NetclawPaths paths) : IDoctorC
         string crashText;
         try
         {
-            crashText = File.ReadAllText(latestCrash.FullName);
+            crashText = CrashLogHelper.ReadAllTextShared(latestCrash.FullName);
         }
         catch (Exception ex)
         {

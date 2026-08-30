@@ -40,10 +40,14 @@ internal readonly record struct StreamUpdateClassification(
 
 /// <summary>
 /// The fully consumed streaming response plus its accumulated diagnostics.
+/// <see cref="ThinkingCapBreached"/> is true when the reader stopped the stream
+/// because accumulated thinking content reached the configured cap; everything
+/// read up to the breach is retained in <see cref="Response"/>.
 /// </summary>
 internal readonly record struct StreamReadResult(
     ChatResponse Response,
-    StreamDiagnostics Diagnostics);
+    StreamDiagnostics Diagnostics,
+    bool ThinkingCapBreached = false);
 
 /// <summary>
 /// Single owner of the streaming LLM consumption loop shared by the main-session
@@ -71,13 +75,21 @@ internal static class StreamingResponseReader
         IEnumerable<AiChatMessage> messages,
         ChatOptions? options,
         CancellationToken ct)
-        => ReadAsync(client, messages, options, NoOp, ct);
+        => ReadAsync(client, messages, options, NoOp, thinkingCapChars: 0, ct);
 
+    /// <param name="thinkingCapChars">
+    /// Maximum accumulated thinking characters accepted in this response;
+    /// 0 disables the cap. On breach the reader stops enumerating (disposing
+    /// the enumerator cancels the underlying provider stream), keeps every
+    /// update read so far, and flags the result — the caller decides how to
+    /// recover (turn-loop-governance per-response thinking cap).
+    /// </param>
     public static async Task<StreamReadResult> ReadAsync(
         IChatClient client,
         IEnumerable<AiChatMessage> messages,
         ChatOptions? options,
         Action<ChatResponseUpdate, StreamUpdateClassification, StreamDiagnostics> onUpdate,
+        int thinkingCapChars,
         CancellationToken ct)
     {
         var updates = new List<ChatResponseUpdate>();
@@ -91,6 +103,7 @@ internal static class StreamingResponseReader
         var toolCallDeltaCount = 0;
         string? finishReason = null;
         var anySubstantiveSeen = false;
+        var thinkingCapBreached = false;
 
         await foreach (var update in client.GetStreamingResponseAsync(messages, options, ct))
         {
@@ -137,6 +150,14 @@ internal static class StreamingResponseReader
                     thinkingChars,
                     toolCallDeltaCount,
                     finishReason));
+
+            if (thinkingCapChars > 0 && thinkingChars >= thinkingCapChars)
+            {
+                // Breaking out disposes the stream enumerator, which cancels the
+                // provider call. Everything read so far stays in `updates`.
+                thinkingCapBreached = true;
+                break;
+            }
         }
 
         // The full response is reassembled from the retained updates. The fallback
@@ -157,7 +178,8 @@ internal static class StreamingResponseReader
                 thinkingDeltaCount,
                 thinkingChars,
                 toolCallDeltaCount,
-                finishReason));
+                finishReason),
+            thinkingCapBreached);
     }
 
     /// <summary>

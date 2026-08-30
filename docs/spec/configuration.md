@@ -166,7 +166,11 @@ Tuning parameters for LLM session behavior.
     "MaxToolIterationsPerTurn": 60,
     "SidecarLlmTimeoutSeconds": 90,
     "TurnLlmTimeoutSeconds": 180,
-    "ToolExecutionTimeoutSeconds": 90
+    "ToolExecutionTimeoutSeconds": 90,
+    "ToolErrorNudgeEnabled": true,
+    "ThinkingCapEnabled": true,
+    "ThinkingCapChars": 120000,
+    "PlanRepromptEnabled": false
   }
 }
 ```
@@ -180,6 +184,10 @@ Tuning parameters for LLM session behavior.
 | `SidecarLlmTimeoutSeconds` | int | `90` | Timeout for sidecar LLM calls (title generation, observer summaries, memory extraction). |
 | `TurnLlmTimeoutSeconds` | int | `180` | Timeout for the primary per-turn LLM streaming call before forcing an error/recovery path. |
 | `ToolExecutionTimeoutSeconds` | int | `90` | Per-tool-call inactivity budget. A tool must produce its first result or stream item within this time, and each later item resets the budget. |
+| `ToolErrorNudgeEnabled` | bool | `true` | When a tool iteration returns an error result, append one follow-up nudge (try a different approach or report the failure) before the next model invocation. Suppressed when the duplicate-call guard already fired for that tool this turn. |
+| `ThinkingCapEnabled` | bool | `true` | Enforce the per-response thinking cap. On breach the stream is cancelled, the accumulated thinking is kept, and the model is re-invoked once per turn with an act-or-report nudge; a second breach ends the turn with a message that names the cap. |
+| `ThinkingCapChars` | int | `120000` | Thinking-content cap per streamed response, in characters (token counts are unavailable mid-stream). Each breach writes one `turn_thinking_cap_breach` log record for cap sizing. |
+| `PlanRepromptEnabled` | bool | `false` | Re-prompt a plan-only reply (short, states intent, no tool call, no final answer) up to 3 times per turn with repeat guards. Would-have-fired events are logged (`turn_plan_without_action`) even while disabled. |
 
 ### Tools
 

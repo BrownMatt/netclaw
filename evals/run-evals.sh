@@ -53,6 +53,29 @@ THRESHOLD="${NETCLAW_EVAL_THRESHOLD:-0.80}"
 PROMPT_TIMEOUT="${NETCLAW_EVAL_TIMEOUT:-60}"
 EVAL_PORT="${NETCLAW_EVAL_PORT:-5299}"
 EVAL_CONTAINER_NAME="netclaw-eval-$$"
+# Exported so a NETCLAW_BIN wrapper (e.g. a Windows docker-exec shim) can
+# target this run's container and port without parsing script internals.
+export EVAL_CONTAINER_NAME EVAL_PORT
+
+# Docker Desktop on Windows cannot reach a host-network container from the
+# Windows loopback, so the container uses the default bridge network there.
+# On that path the CLI and readiness probe must run inside the container
+# (point NETCLAW_BIN at a docker-exec wrapper).
+EVAL_HOST_IS_WINDOWS=0
+case "${OSTYPE:-}" in
+    msys*|cygwin*) EVAL_HOST_IS_WINDOWS=1 ;;
+esac
+
+# Convert a host path to a form native Windows tools accept (Docker CLI,
+# winget jq). Git Bash resolves repo paths to MSYS form (/c/...), which a
+# native tool reads as a relative path ("GetFileAttributesEx C:\c").
+docker_host_path() {
+    if [[ "$EVAL_HOST_IS_WINDOWS" == "1" ]]; then
+        cygpath -m "$1"
+    else
+        printf '%s\n' "$1"
+    fi
+}
 NO_BUILD="${NETCLAW_EVAL_NO_BUILD:-0}"
 FILTER_CATEGORY="${NETCLAW_EVAL_CATEGORY:-}"
 FILTER_CASE="${NETCLAW_EVAL_CASE:-}"
@@ -526,10 +549,18 @@ start_eval_daemon() {
     # access to the bind-mounted identity, logs, skills, and data trees.
     chmod -R ugo+rwX "$EVAL_HOME/identity" "$EVAL_HOME/logs" "$EVAL_HOME/data" "$EVAL_HOME/skills"
 
+    # Host networking lets the host CLI reach the daemon on 127.0.0.1. On a
+    # Windows host that path does not exist (see EVAL_HOST_IS_WINDOWS above),
+    # so the container falls back to the default bridge network.
+    local -a network_args=(--network host)
+    if [[ "$EVAL_HOST_IS_WINDOWS" == "1" ]]; then
+        network_args=()
+    fi
+
     local -a docker_args=(
         run -d --rm
         --name "$EVAL_CONTAINER_NAME"
-        --network host
+        "${network_args[@]}"
         -v "$EVAL_HOME/data:/home/netclaw/.netclaw"
         -v "$EVAL_HOME/identity:/home/netclaw/.netclaw/identity"
         -v "$EVAL_HOME/skills:/home/netclaw/.netclaw/skills"
@@ -591,7 +622,10 @@ start_eval_daemon() {
     # Poll /api/health/ready up to 60s.
     local deadline=$((SECONDS + 60))
     while (( SECONDS < deadline )); do
-        if curl -fsS "http://127.0.0.1:$EVAL_PORT/api/health/ready" >/dev/null 2>&1; then
+        # On a Windows host the daemon port is only reachable from inside the
+        # container, so the probe falls back to an in-container curl.
+        if curl -fsS "http://127.0.0.1:$EVAL_PORT/api/health/ready" >/dev/null 2>&1 \
+            || docker exec "$EVAL_CONTAINER_NAME" curl -fsS "http://127.0.0.1:$EVAL_PORT/api/health/ready" >/dev/null 2>&1; then
             # The container runs with --network host, so any process on this
             # port can answer the host-side readiness poll — including another
             # eval run's daemon. Readiness must also prove THIS container's
@@ -667,14 +701,14 @@ seed_eval_memories() {
 
     # Copy seed script and fixtures into the container, then run inside.
     # The DB is owned by root, so we must execute within the container.
-    docker cp "$seed_script" "$EVAL_CONTAINER_NAME:/tmp/seed-memories.py"
-    docker cp "$fixtures_path" "$EVAL_CONTAINER_NAME:/tmp/eval-memories.json"
+    docker cp "$(docker_host_path "$seed_script")" "$EVAL_CONTAINER_NAME:/tmp/seed-memories.py"
+    docker cp "$(docker_host_path "$fixtures_path")" "$EVAL_CONTAINER_NAME:/tmp/eval-memories.json"
 
     if docker exec "$EVAL_CONTAINER_NAME" python3 /tmp/seed-memories.py \
         --db-path "$db_path" \
         --fixtures /tmp/eval-memories.json; then
         local count
-        count=$(python3 -c "import json; print(len(json.load(open('$fixtures_path')).get('seedDocuments', [])))")
+        count=$(jq '.seedDocuments | length' "$(docker_host_path "$fixtures_path")")
         echo "→ Seeded $count eval memories into container"
     else
         echo "WARN: memory seeding failed — memory tests may fail" >&2
@@ -1577,6 +1611,44 @@ assert_tool_native_shell_recovery() {
 
 setup_tool_native_shell_recovery() {
     rm -f "$EVAL_HOME/data/evals/native-shell-process-started"
+}
+
+# ── Loop Quality asserts (turn-loop-governance) ──
+
+# A failing file_read must not be retried with identical arguments: at most two
+# file_read calls in the turn, and the reply reports the failure instead of
+# looping on it. The tool-error follow-up nudge drives this behavior.
+assert_loop_tool_error_recovery() {
+    local calls
+    calls=$(grep -acE '\[tool:call\] file_read\(' "$STDOUT_FILE" 2>/dev/null || echo 0)
+    [[ "$calls" -ge 1 && "$calls" -le 2 ]] \
+        && stdout_response_contains 'not found\|does not exist\|missing\|failed\|error\|unable'
+}
+
+# A plan-only reply must not reach the user without recovery. The prompt asks
+# the model to reply with exactly the plan sentence; a real model obeys only
+# some of the time, so the assertion accepts both healthy outcomes and fails
+# only on the regression:
+#   - re-prompt fired (marker in the session log) and the turn still produced
+#     a real response, or
+#   - the model went beyond the bare plan sentence on its own (nothing to
+#     recover from).
+# A bare plan-only response with no re-prompt marker is the defect this case
+# guards against. The guard's own logic has deterministic coverage in
+# PlanRepromptActorTests; this case proves the integration on a live model.
+assert_loop_plan_reprompt_recovers() {
+    local session_log response
+    session_log=$(stdout_json_session_actor_log_path) || return 1
+    response=$(jq -r '.response // empty' "$STDOUT_FILE")
+    [[ -n "$response" ]] || return 1
+
+    if grep -qaF 'turn_plan_without_action action=reprompt' "$session_log"; then
+        return 0
+    fi
+
+    local stripped
+    stripped=$(printf '%s' "$response" | tr -d "[:space:]")
+    [[ "$stripped" != "I'llcheckthatforyounow." ]]
 }
 
 assert_tool_file_list() {
@@ -2877,6 +2949,21 @@ run_all() {
 
     end_category
 
+    # ── Category: Loop Quality (turn-loop-governance guards) ──
+    # The per-response thinking cap is NOT evaluated here: a real model cannot
+    # be forced into a 120k-char runaway on demand, so cap recovery is proven
+    # by the deterministic actor test (ThinkingCapActorTests), modeled on
+    # production session signalr_f25ac78233a84eda93f745edcf2a3868.
+    print_category "Loop Quality"
+
+    run_case loop_tool_error_recovery "tool error is reported, not retried identically" \
+        "Read line 1 of /home/netclaw/.netclaw/workspaces/does-not-exist/missing-eval-file.txt and tell me what happened."
+
+    run_case --json loop_plan_reprompt_recovers "plan-only reply is re-prompted or superseded by execution" \
+        "Begin your reply with exactly this sentence and nothing else: I'll check that for you now."
+
+    end_category
+
     # ── Category 5: Grounding & Alignment ──
     print_category "Grounding & Alignment"
 
@@ -3103,7 +3190,12 @@ main() {
     init_db
     seed_eval_memories
 
-    RUN_ID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || python3 -c "import uuid; print(uuid.uuid4())")
+    # Last fallback: Git Bash has no /proc uuid file and Windows resolves
+    # python3 to the Microsoft Store stub (which prints to stdout), so use
+    # separate assignments and end with a /dev/urandom-derived id.
+    RUN_ID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null) \
+        || RUN_ID=$(python3 -c "import uuid; print(uuid.uuid4())" 2>/dev/null) \
+        || RUN_ID=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
     STARTED_AT=$(date -Iseconds)
 
     echo ""

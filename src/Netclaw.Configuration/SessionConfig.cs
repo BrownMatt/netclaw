@@ -94,6 +94,38 @@ public sealed record SessionConfig
     public TimeSpan NoProgressTimeout { get; init; } = TimeSpan.FromSeconds(1200);
 
     /// <summary>
+    /// When true, a tool iteration that returns an error result appends one
+    /// follow-up nudge (try a different approach or report the failure) before
+    /// the next model invocation. Suppressed when the duplicate-call guard
+    /// already fired for that tool in the same turn.
+    /// </summary>
+    public bool ToolErrorNudgeEnabled { get; init; } = true;
+
+    /// <summary>
+    /// When true, a single streamed response may accumulate at most
+    /// <see cref="ThinkingCapChars"/> characters of thinking content. On breach
+    /// the stream is cancelled, the accumulated thinking is kept, and the model
+    /// is re-invoked once per turn with an act-or-report nudge.
+    /// </summary>
+    public bool ThinkingCapEnabled { get; init; } = true;
+
+    /// <summary>
+    /// Thinking-content cap per streamed response, in characters (not tokens:
+    /// token counts are unavailable mid-stream). Default 120,000 (~30k tokens)
+    /// sits far above any legitimate response observed and far below a runaway
+    /// thinking loop. Only consulted when <see cref="ThinkingCapEnabled"/>.
+    /// </summary>
+    public int ThinkingCapChars { get; init; } = 120_000;
+
+    /// <summary>
+    /// When true, a completed response that only states a plan (short, intent
+    /// to act, no tool call, no final answer) is re-prompted up to 3 times per
+    /// turn to execute the plan. Ships disabled; would-have-fired events are
+    /// logged even when disabled so the heuristic can be observed first.
+    /// </summary>
+    public bool PlanRepromptEnabled { get; init; }
+
+    /// <summary>
     /// Internal tuning constants. Bindable from config for development/testing
     /// but not part of the documented operator surface.
     /// </summary>
@@ -128,6 +160,10 @@ public sealed record SessionConfig
             NoProgressTimeout = raw.NoProgressTimeoutSeconds > 0
                 ? TimeSpan.FromSeconds(raw.NoProgressTimeoutSeconds)
                 : TimeSpan.FromSeconds(1200),
+            ToolErrorNudgeEnabled = raw.ToolErrorNudgeEnabled,
+            ThinkingCapEnabled = raw.ThinkingCapEnabled,
+            ThinkingCapChars = Math.Max(1, raw.ThinkingCapChars),
+            PlanRepromptEnabled = raw.PlanRepromptEnabled,
             Tuning = tuning,
         };
     }
@@ -181,5 +217,9 @@ public sealed record SessionConfig
         public int FirstTokenTimeoutSeconds { get; init; }
         public int PrefillTimeoutSeconds { get; init; }
         public int NoProgressTimeoutSeconds { get; init; }
+        public bool ToolErrorNudgeEnabled { get; init; } = true;
+        public bool ThinkingCapEnabled { get; init; } = true;
+        public int ThinkingCapChars { get; init; } = 120_000;
+        public bool PlanRepromptEnabled { get; init; }
     }
 }

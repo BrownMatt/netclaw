@@ -59,8 +59,9 @@ public sealed class DaemonCrashDoctorCheck(
     {
         try
         {
-            using var stream = crashLog.OpenRead();
-            using var reader = new StreamReader(stream);
+            // A crashing daemon can still hold the crash log open for write;
+            // read with writer-tolerant sharing so the check does not misreport.
+            using var reader = CrashLogHelper.OpenSharedLogReader(crashLog.FullName);
             var firstLine = reader.ReadLine();
             return !string.IsNullOrWhiteSpace(firstLine)
                    && firstLine.Contains("Netclaw daemon", StringComparison.OrdinalIgnoreCase);

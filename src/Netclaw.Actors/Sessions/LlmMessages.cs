@@ -26,6 +26,17 @@ internal sealed record LlmResponseReceived : INoSerializationVerificationNeeded
     public AutomaticRecallResult? RecallResult { get; init; }
 
     /// <summary>
+    /// True when the streaming reader cut the response because accumulated
+    /// thinking content reached the configured per-response cap
+    /// (turn-loop-governance). Everything read up to the breach is retained
+    /// in <see cref="Response"/>.
+    /// </summary>
+    public bool ThinkingCapBreached { get; init; }
+
+    /// <summary>Thinking deltas counted by the reader; logged on a cap breach.</summary>
+    public int ThinkingDeltaCount { get; init; }
+
+    /// <summary>
     /// Correlation ID matching <see cref="LlmSessionActor._activeCallId"/>.
     /// Stale responses from cancelled calls are ignored.
     /// </summary>

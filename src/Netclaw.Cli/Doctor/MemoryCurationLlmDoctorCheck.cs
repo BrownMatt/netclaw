@@ -54,7 +54,9 @@ public sealed class MemoryCurationLlmDoctorCheck(NetclawPaths paths, TimeProvide
                     continue;
 
                 cancellationToken.ThrowIfCancellationRequested();
-                using var reader = new StreamReader(file);
+                // The live daemon holds today's log open for write; a plain
+                // StreamReader(path) cannot share with that handle.
+                using var reader = CrashLogHelper.OpenSharedLogReader(file);
                 while (await reader.ReadLineAsync(cancellationToken) is { } line)
                 {
                     // Failure markers first: none of them contains the success

@@ -14,6 +14,27 @@ namespace Netclaw.Cli.Doctor;
 internal static class CrashLogHelper
 {
     /// <summary>
+    /// Opens a log file for read without excluding the writer. The live daemon
+    /// keeps its current log open with an active write handle, and a plain
+    /// <c>new StreamReader(path)</c> shares only read access — on Windows that
+    /// combination fails with "the file is being used by another process".
+    /// <c>FileShare.Delete</c> also lets log rolling or cleanup proceed while
+    /// doctor reads.
+    /// </summary>
+    public static StreamReader OpenSharedLogReader(string path)
+        => new(new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete));
+
+    /// <summary>
+    /// Reads a whole log file with the same writer-tolerant sharing as
+    /// <see cref="OpenSharedLogReader"/>.
+    /// </summary>
+    public static string ReadAllTextShared(string path)
+    {
+        using var reader = OpenSharedLogReader(path);
+        return reader.ReadToEnd();
+    }
+
+    /// <summary>
     /// Returns <c>true</c> if the daemon's PID file was written after the crash log,
     /// indicating the daemon has restarted since the crash occurred.
     /// </summary>

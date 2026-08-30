@@ -3,6 +3,9 @@
   "Webhooks": {
     "Enabled": true
   },
+  "Session": {
+    "PlanRepromptEnabled": true
+  },
   "McpServers": {
     "eval_analytics": {
       "Transport": "stdio",

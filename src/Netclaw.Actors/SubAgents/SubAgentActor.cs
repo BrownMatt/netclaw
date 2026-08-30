@@ -1292,6 +1292,7 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
                             IsSubstantive: cls.HasSubstantiveContent));
                     }
                 },
+                thinkingCapChars: 0,
                 ct);
 
             self.Tell(new LlmResponseReceived

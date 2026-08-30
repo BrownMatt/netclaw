@@ -99,6 +99,34 @@ public sealed class ConfigSchemaDoctorCheckTests
     }
 
     [Fact]
+    public async Task ReturnsPass_WhenLoopQualityGuardConfigMatchesSchemaV1()
+    {
+        var basePath = CreateTempBasePath();
+        var paths = new NetclawPaths(basePath);
+        paths.EnsureDirectoriesExist();
+
+        // Loop-quality guard keys (improve-tool-calling): the schema uses
+        // additionalProperties:false, so this proves the keys are declared.
+        await File.WriteAllTextAsync(paths.NetclawConfigPath,
+            """
+            {
+              "configVersion": 1,
+              "Session": {
+                "ToolErrorNudgeEnabled": false,
+                "ThinkingCapEnabled": true,
+                "ThinkingCapChars": 60000,
+                "PlanRepromptEnabled": true
+              }
+            }
+            """, TestContext.Current.CancellationToken);
+
+        var check = new ConfigSchemaDoctorCheck(paths);
+        var result = await check.RunAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(DoctorSeverity.Pass, result.Severity);
+    }
+
+    [Fact]
     public async Task ReturnsPass_WhenMemoryEmbeddingsConfigMatchesSchemaV1()
     {
         var basePath = CreateTempBasePath();

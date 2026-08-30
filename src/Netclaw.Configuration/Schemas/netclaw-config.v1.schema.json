@@ -194,6 +194,28 @@
           "default": 1200,
           "description": "Hard ceiling in seconds on time without substantive output. Reset only by real streaming tokens — content-free keepalives never extend it — so a backend that heartbeats forever without producing a token is killed once this elapses. Catches a wedged stream the prefill/first-token liveness watchdog cannot, because keepalives refresh those."
         },
+        "ToolErrorNudgeEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "When true, a tool iteration that returns an error result appends one follow-up nudge (try a different approach or report the failure) before the next model invocation. Suppressed when the duplicate-call guard already fired for that tool in the same turn."
+        },
+        "ThinkingCapEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "When true, a single streamed response may accumulate at most ThinkingCapChars characters of thinking content. On breach the stream is cancelled, the accumulated thinking is kept, and the model is re-invoked once per turn with an act-or-report nudge."
+        },
+        "ThinkingCapChars": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 10000000,
+          "default": 120000,
+          "description": "Thinking-content cap per streamed response, in characters (token counts are unavailable mid-stream). Only consulted when ThinkingCapEnabled is true."
+        },
+        "PlanRepromptEnabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, a completed response that only states a plan (short, intent to act, no tool call, no final answer) is re-prompted up to 3 times per turn to execute the plan. Would-have-fired events are logged even when disabled."
+        },
         "CompactionThreshold": {
           "type": "number",
           "minimum": 0.1,

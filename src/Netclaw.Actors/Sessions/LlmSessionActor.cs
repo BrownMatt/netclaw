@@ -84,6 +84,13 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
     // Live-only coordination for the currently executing streamed tool batch.
     // Durable recovery derives unanswered calls from _state.History.
     private readonly ActiveToolBatchTracker _activeToolBatch = new();
+
+    // Error tool names accumulated from streamed single-result completions for
+    // the tool-error follow-up nudge; the streamed batch-completion message
+    // carries no receipts, so they are collected here as singles arrive.
+    // Journal replay restores batches without receipts, so a nudge lost to a
+    // mid-batch restart is accepted.
+    private readonly List<string> _streamedErrorToolNames = [];
     // Media loaded by tools for model-visible inspection during a streamed tool
     // batch; drained into a system nudge when the batch completes.
     private readonly ModelInputMediaBuffer _mediaBuffer = new();
@@ -764,6 +771,29 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
             analysis.ToolCalls.Count,
             response.FinishReason?.ToString() ?? "null");
 
+        if (msg.ThinkingCapBreached)
+        {
+            // Per-response thinking cap (turn-loop-governance): the reader cut
+            // the stream; the streamed thinking already reached the transcript.
+            // One act-or-report re-prompt per turn, then fail visibly.
+            switch (_turnState.EvaluateThinkingCapBreach())
+            {
+                case EmptyResponseAction.Retry retry:
+                    TurnLog().Warning(
+                        "turn_thinking_cap_breach model={ModelId} thinkingChars={ThinkingChars} thinkingDeltas={ThinkingDeltas} action=reprompt",
+                        _model.ModelId, analysis.ThinkingChars, msg.ThinkingDeltaCount);
+                    _state = _state.AddSystemNudge(retry.NudgeText);
+                    FireLlmCall();
+                    return;
+                case EmptyResponseAction.Fail fail:
+                    TurnLog().Warning(
+                        "turn_thinking_cap_breach model={ModelId} thinkingChars={ThinkingChars} thinkingDeltas={ThinkingDeltas} action=fail",
+                        _model.ModelId, analysis.ThinkingChars, msg.ThinkingDeltaCount);
+                    FailCurrentTurn(fail.ErrorMessage, fail.Cause, ErrorCategory.ProviderFailure);
+                    return;
+            }
+        }
+
         if (analysis.Kind == LlmResponseKind.ToolCalls && _turnState.ForceNoToolsActive)
         {
             TurnLog().Warning(
@@ -799,6 +829,36 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
                     _log.Warning("LLM produced {Kind} response — failing turn", analysis.Kind);
                     FailCurrentTurn(fail.ErrorMessage, fail.Cause, ErrorCategory.ProviderFailure);
                     return;
+            }
+        }
+
+        // Plan-without-action re-prompt (turn-loop-governance). While disabled,
+        // matches are still logged so the heuristic can be observed before any
+        // deployment opts in (measure before invest).
+        if (analysis.Kind == LlmResponseKind.Text
+            && LlmResponseClassifier.IsPlanWithoutAction(lastMessage.Text))
+        {
+            if (_config.PlanRepromptEnabled)
+            {
+                if (_turnState.EvaluatePlanWithoutAction(lastMessage.Text) is { } planNudge)
+                {
+                    TurnLog().Info(
+                        "turn_plan_without_action action=reprompt textChars={TextChars}",
+                        analysis.TextChars);
+                    _state = _state.AddSystemNudge(planNudge);
+                    FireLlmCall();
+                    return;
+                }
+
+                TurnLog().Info(
+                    "turn_plan_without_action action=deliver reason=budget_or_restatement textChars={TextChars}",
+                    analysis.TextChars);
+            }
+            else
+            {
+                TurnLog().Info(
+                    "turn_plan_without_action action=observe_disabled textChars={TextChars}",
+                    analysis.TextChars);
             }
         }
 
@@ -997,6 +1057,34 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
                 "turn_duplicate_tool_detected tool={ToolName} count={Count} iteration={Iteration}",
                 dupNudge.ToolName, dupNudge.Count, _turnState.ToolIterationCount);
             _state = _state.AddSystemNudge(dupNudge.NudgeText);
+        }
+
+        // Tool-error follow-up nudge (turn-loop-governance): evaluated after the
+        // duplicate check so its per-tool suppression sees a duplicate nudge
+        // fired in this same iteration. Receipts are absent on the journal-replay
+        // batch path (CompleteToolBatch), so a nudge lost to a mid-batch restart
+        // is accepted.
+        if (_config.ToolErrorNudgeEnabled)
+        {
+            var errorToolNames = new List<string>();
+            foreach (var result in msg.ToolResults)
+            {
+                if (result.Name is { Length: > 0 } errToolName
+                    && result.ToolCallId is { } errCallId
+                    && msg.ToolReceipts.TryGetValue(errCallId.Value, out var errReceipt)
+                    && errReceipt.Category != ToolInvocationOutcomeCategory.Success)
+                {
+                    errorToolNames.Add(errToolName);
+                }
+            }
+
+            if (_turnState.EvaluateToolErrors(errorToolNames) is { } errorNudge)
+            {
+                TurnLog().Info(
+                    "turn_tool_error_nudge tools={Tools} iteration={Iteration}",
+                    string.Join(",", errorNudge.ToolNames), _turnState.ToolIterationCount);
+                _state = _state.AddSystemNudge(errorNudge.NudgeText);
+            }
         }
 
         if (_buffer.Count > 0)
@@ -2875,7 +2963,10 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
             forceNoTools,
             _activeCallId);
 
-        _ = SessionLlmInvoker.InvokeAsync(client, messages, options, self, _activeCallId, _sessionId, _activeLlmCts!.Token);
+        _ = SessionLlmInvoker.InvokeAsync(
+            client, messages, options, self, _activeCallId, _sessionId,
+            thinkingCapChars: _config.ThinkingCapEnabled ? _config.ThinkingCapChars : 0,
+            _activeLlmCts!.Token);
     }
 
     private async Task<INoSerializationVerificationNeeded> CreateWorkingContextContinuationAsync(
@@ -3674,6 +3765,7 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
     private void ClearActiveToolBatchTracking()
     {
         _activeToolBatch.Clear();
+        _streamedErrorToolNames.Clear();
         _mediaBuffer.Clear();
     }
 
@@ -4602,6 +4694,13 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
         _sessionScratchCorrections.Apply(result.ScratchCorrectionChange);
         TrackStartedBackgroundJob(result.StartedBackgroundJob);
 
+        if (result.Receipt is { } errorReceipt
+            && errorReceipt.Category != ToolInvocationOutcomeCategory.Success
+            && result.Message.Name is { Length: > 0 } errorToolName)
+        {
+            _streamedErrorToolNames.Add(errorToolName);
+        }
+
         var emittedRunIds = new HashSet<SubAgentRunId>();
         foreach (var finding in result.AcceptedSubAgentFindings)
         {
@@ -4766,6 +4865,21 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
                 dupNudge.ToolName, dupNudge.Count, _turnState.ToolIterationCount);
             _state = _state.AddSystemNudge(dupNudge.NudgeText);
         }
+
+        // Tool-error follow-up nudge for the streamed path: error names were
+        // collected per single result (receipts never reach the streamed batch
+        // completion message). Evaluated after the duplicate check so per-tool
+        // suppression sees a duplicate nudge fired in this same iteration.
+        if (_config.ToolErrorNudgeEnabled
+            && _turnState.EvaluateToolErrors(_streamedErrorToolNames) is { } streamedErrorNudge)
+        {
+            TurnLog().Info(
+                "turn_tool_error_nudge tools={Tools} iteration={Iteration}",
+                string.Join(",", streamedErrorNudge.ToolNames), _turnState.ToolIterationCount);
+            _state = _state.AddSystemNudge(streamedErrorNudge.NudgeText);
+        }
+
+        _streamedErrorToolNames.Clear();
 
         if (_buffer.Count > 0)
         {

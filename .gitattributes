@@ -13,6 +13,12 @@
 # bytes stable when Git runs on Windows with automatic CRLF conversion.
 openspec/changes/**/evidence/*.json text eol=lf working-tree-encoding=UTF-8
 
+# Shell scripts must stay LF on every platform. A Windows checkout with CRLF
+# breaks the shebang line when the script lands in a Linux Docker image
+# (tini reports "exec /opt/netclaw/entrypoint.sh failed: No such file or
+# directory") and breaks bash execution of repo scripts.
+*.sh text eol=lf
+
 ###############################################################################
 # Set default behavior for command prompt diff.
 #
