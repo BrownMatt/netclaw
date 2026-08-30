@@ -16,6 +16,8 @@ using Netclaw.Tools;
 using R3;
 using Xunit;
 
+using Netclaw.Client;
+
 namespace Netclaw.Cli.Tests.Mcp;
 
 public sealed class McpToolPermissionsViewModelTests : IDisposable

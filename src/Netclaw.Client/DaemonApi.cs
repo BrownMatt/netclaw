@@ -8,11 +8,10 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
-using Netclaw.Cli.Config;
-using Netclaw.Cli.Json;
+using Microsoft.Extensions.Configuration;
 using Netclaw.Configuration;
 
-namespace Netclaw.Cli.Daemon;
+namespace Netclaw.Client;
 
 /// <summary>
 /// Single shared abstraction for all daemon REST HTTP communication.

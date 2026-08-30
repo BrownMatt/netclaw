@@ -19,6 +19,8 @@ using Termina.Terminal;
 using Xunit;
 using static Netclaw.Actors.Sessions.SessionProtocol;
 
+using Netclaw.Client;
+
 namespace Netclaw.Cli.Tests.Tui;
 
 /// <summary>

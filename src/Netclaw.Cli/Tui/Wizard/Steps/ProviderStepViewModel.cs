@@ -9,7 +9,7 @@ using System.Text.Json.Nodes;
 using Microsoft.Extensions.DependencyInjection;
 using Netclaw.Cli.Config;
 using Netclaw.Cli.Daemon;
-using Netclaw.Cli.Json;
+using Netclaw.Client;
 using Netclaw.Cli.Tui;
 using Netclaw.Cli.Tui.Sections;
 using Netclaw.Configuration;

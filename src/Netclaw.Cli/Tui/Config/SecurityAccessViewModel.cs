@@ -5,7 +5,7 @@
 // -----------------------------------------------------------------------
 using System.Text.Json;
 using Netclaw.Cli.Config;
-using Netclaw.Cli.Json;
+using Netclaw.Client;
 using Netclaw.Cli.Mcp;
 using Netclaw.Cli.Tui.Sections;
 using Netclaw.Cli.Tui.Wizard.Steps;

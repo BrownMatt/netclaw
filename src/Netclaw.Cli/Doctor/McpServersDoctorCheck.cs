@@ -9,6 +9,8 @@ using Netclaw.Cli.Daemon;
 using Netclaw.Cli.Mcp;
 using Netclaw.Configuration;
 
+using Netclaw.Client;
+
 namespace Netclaw.Cli.Doctor;
 
 /// <summary>

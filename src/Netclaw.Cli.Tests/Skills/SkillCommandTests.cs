@@ -13,6 +13,8 @@ using Netclaw.Configuration;
 using Netclaw.Tests.Utilities;
 using Xunit;
 
+using Netclaw.Client;
+
 namespace Netclaw.Cli.Tests.Skills;
 
 /// <summary>

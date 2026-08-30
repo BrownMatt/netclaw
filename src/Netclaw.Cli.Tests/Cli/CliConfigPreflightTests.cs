@@ -9,6 +9,8 @@ using Netclaw.Configuration;
 using Netclaw.Tests.Utilities;
 using Xunit;
 
+using Netclaw.Client;
+
 namespace Netclaw.Cli.Tests.Cli;
 
 public sealed class CliConfigPreflightTests : IDisposable
@@ -89,7 +91,7 @@ public sealed class CliConfigPreflightTests : IDisposable
     [Fact]
     public void TryWriteMissingConfig_PairedClientEndpoint_AllowsCommand()
     {
-        Netclaw.Cli.Config.ClientConfigFile.WriteEndpoint(_paths, "https://daemon.example.net:5299");
+        Netclaw.Client.ClientConfigFile.WriteEndpoint(_paths, "https://daemon.example.net:5299");
         using var writer = new StringWriter();
 
         var blocked = CliConfigPreflight.TryWriteMissingConfig(_paths, jsonOutput: false, writer, out var exitCode);

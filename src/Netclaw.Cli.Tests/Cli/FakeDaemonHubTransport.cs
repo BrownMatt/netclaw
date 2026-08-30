@@ -6,6 +6,8 @@
 using Netclaw.Actors.Protocol;
 using Netclaw.Cli.Daemon;
 
+using Netclaw.Client;
+
 namespace Netclaw.Cli.Tests.Cli;
 
 /// <summary>

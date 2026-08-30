@@ -7,7 +7,7 @@ using System.Globalization;
 using System.Text.Json;
 using Microsoft.Extensions.Configuration;
 using Netclaw.Cli.Config;
-using Netclaw.Cli.Json;
+using Netclaw.Client;
 using Netclaw.Cli.Provider;
 using Netclaw.Configuration;
 using Netclaw.Providers;

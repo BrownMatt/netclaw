@@ -28,6 +28,8 @@ using Netclaw.Tests.Utilities;
 using Netclaw.Tools;
 using Xunit;
 
+using Netclaw.Client;
+
 namespace Netclaw.Cli.Tests.Mcp;
 
 public sealed class McpOAuthEndToEndTests : IDisposable

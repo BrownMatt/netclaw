@@ -21,6 +21,8 @@ using Termina.Reactive;
 using Termina.Terminal;
 using Xunit;
 
+using Netclaw.Client;
+
 namespace Netclaw.Cli.Tests.Tui;
 
 /// <summary>

@@ -18,7 +18,7 @@ using Netclaw.Cli.Approvals;
 using Netclaw.Cli.Config;
 using Netclaw.Cli.Daemon;
 using Netclaw.Cli.Discord;
-using Netclaw.Cli.Json;
+using Netclaw.Client;
 using Netclaw.Cli.Doctor;
 using Netclaw.Cli.Mcp;
 using Netclaw.Cli.Mattermost;

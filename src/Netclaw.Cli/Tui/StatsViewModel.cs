@@ -9,6 +9,8 @@ using R3;
 using Termina.Input;
 using Termina.Reactive;
 
+using Netclaw.Client;
+
 namespace Netclaw.Cli.Tui;
 
 public sealed class StatsViewModel : ReactiveViewModel

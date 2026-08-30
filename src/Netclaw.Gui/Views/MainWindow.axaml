@@ -1,0 +1,36 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:Netclaw.Gui.ViewModels"
+        x:Class="Netclaw.Gui.Views.MainWindow"
+        x:DataType="vm:MainWindowViewModel"
+        Title="Netclaw"
+        Width="900" Height="640">
+
+  <DockPanel Margin="8">
+
+    <TextBlock DockPanel.Dock="Top"
+               Text="{Binding Status}"
+               Margin="0,0,0,8" />
+
+    <Grid DockPanel.Dock="Bottom" ColumnDefinitions="*,Auto" Margin="0,8,0,0">
+      <TextBox Grid.Column="0"
+               Text="{Binding InputText}"
+               PlaceholderText="Message the agent...">
+        <TextBox.KeyBindings>
+          <KeyBinding Gesture="Enter" Command="{Binding SendCommand}" />
+        </TextBox.KeyBindings>
+      </TextBox>
+      <Button Grid.Column="1"
+              Content="Send"
+              Command="{Binding SendCommand}"
+              Margin="8,0,0,0" />
+    </Grid>
+
+    <TextBox Text="{Binding OutputText, Mode=OneWay}"
+             IsReadOnly="True"
+             AcceptsReturn="True"
+             TextWrapping="Wrap" />
+
+  </DockPanel>
+
+</Window>

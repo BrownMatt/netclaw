@@ -5,10 +5,10 @@
 // -----------------------------------------------------------------------
 using System.Text.Json;
 using Microsoft.Extensions.Configuration;
-using Netclaw.Cli.Config;
 using Netclaw.Configuration;
+using Netclaw.Configuration.Secrets;
 
-namespace Netclaw.Cli.Daemon;
+namespace Netclaw.Client;
 
 /// <summary>
 /// Factory helpers for creating <see cref="DaemonClient"/> instances with the
@@ -23,14 +23,14 @@ namespace Netclaw.Cli.Daemon;
 /// provider passed to <see cref="DaemonClient"/>.
 /// </para>
 /// </summary>
-internal static class DaemonClientFactory
+public static class DaemonClientFactory
 {
     /// <summary>
     /// Creates a <see cref="DaemonClient"/> for the given endpoint, attaching a
     /// bearer token for non-loopback connections if a <c>DeviceToken</c> is present
     /// in <c>secrets.json</c>.
     /// </summary>
-    internal static DaemonClient Create(string endpoint, NetclawPaths paths)
+    public static DaemonClient Create(string endpoint, NetclawPaths paths)
     {
         var accessTokenProvider = CreateAccessTokenProvider(endpoint, paths, ResolveExposureMode(paths));
         return new DaemonClient(endpoint, accessTokenProvider: accessTokenProvider);
@@ -101,14 +101,18 @@ internal static class DaemonClientFactory
         if (!File.Exists(paths.SecretsPath))
             return null;
 
-        var dict = ConfigFileHelper.LoadJsonDict(paths.SecretsPath);
-        if (!dict.TryGetValue("DeviceToken", out var val))
+        var dict = JsonSerializer.Deserialize<Dictionary<string, object>>(
+            File.ReadAllText(paths.SecretsPath));
+        if (dict is null || !dict.TryGetValue("DeviceToken", out var val))
             return null;
 
         var raw = val is JsonElement je ? je.GetString() : val?.ToString();
         if (string.IsNullOrWhiteSpace(raw))
             return null;
 
-        return ConfigFileHelper.DecryptIfEncrypted(paths, raw);
+        if (!ISecretsProtector.IsEncrypted(raw))
+            return raw;
+
+        return SecretsProtection.CreateProtector(paths).Unprotect(raw);
     }
 }

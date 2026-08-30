@@ -31,6 +31,7 @@
 
 <ItemGroup>
     <ProjectReference Include="..\Netclaw.Actors\Netclaw.Actors.csproj" />
+    <ProjectReference Include="..\Netclaw.Client\Netclaw.Client.csproj" />
     <ProjectReference Include="..\Netclaw.Configuration\Netclaw.Configuration.csproj" />
     <ProjectReference Include="..\Netclaw.Embeddings\Netclaw.Embeddings.csproj" />
     <ProjectReference Include="..\Netclaw.Channels\Netclaw.Channels.csproj" />

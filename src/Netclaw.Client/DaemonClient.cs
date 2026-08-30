@@ -11,7 +11,7 @@ using Netclaw.Actors.Channels;
 using Netclaw.Actors.Protocol;
 using static Netclaw.Actors.Sessions.SessionProtocol;
 
-namespace Netclaw.Cli.Daemon;
+namespace Netclaw.Client;
 
 /// <summary>
 /// Thin SignalR client for daemon-backed sessions.

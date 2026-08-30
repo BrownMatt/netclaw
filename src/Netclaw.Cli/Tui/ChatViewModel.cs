@@ -13,6 +13,8 @@ using R3;
 using Termina.Reactive;
 using static Netclaw.Actors.Sessions.SessionProtocol;
 
+using Netclaw.Client;
+
 namespace Netclaw.Cli.Tui;
 
 /// <summary>

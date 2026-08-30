@@ -9,7 +9,7 @@ using System.Text.Json;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using Netclaw.Cli.Json;
+using Netclaw.Client;
 using Netclaw.Configuration;
 using Netclaw.Actors.Protocol;
 using Netclaw.Channels;

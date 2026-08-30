@@ -9,7 +9,7 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using Netclaw.Actors.Skills;
 using Netclaw.Cli.Config;
-using Netclaw.Cli.Json;
+using Netclaw.Client;
 using Netclaw.Configuration;
 using Netclaw.Configuration.Secrets;
 using R3;

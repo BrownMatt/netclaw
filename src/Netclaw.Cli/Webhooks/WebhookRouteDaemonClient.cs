@@ -7,6 +7,8 @@ using System.Net;
 using System.Text.Json;
 using Netclaw.Cli.Daemon;
 
+using Netclaw.Client;
+
 namespace Netclaw.Cli.Webhooks;
 
 /// <summary>Outcome of one webhook route call against the daemon.</summary>

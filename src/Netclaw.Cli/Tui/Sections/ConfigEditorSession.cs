@@ -4,7 +4,7 @@
 // </copyright>
 // -----------------------------------------------------------------------
 using Netclaw.Cli.Config;
-using Netclaw.Cli.Json;
+using Netclaw.Client;
 using Netclaw.Cli.Secrets;
 using Netclaw.Configuration;
 

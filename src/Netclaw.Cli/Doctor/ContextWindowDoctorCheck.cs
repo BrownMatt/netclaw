@@ -8,6 +8,8 @@ using Microsoft.Extensions.Configuration;
 using Netclaw.Cli.Daemon;
 using Netclaw.Configuration;
 
+using Netclaw.Client;
+
 namespace Netclaw.Cli.Doctor;
 
 public sealed class ContextWindowDoctorCheck : IDoctorCheck

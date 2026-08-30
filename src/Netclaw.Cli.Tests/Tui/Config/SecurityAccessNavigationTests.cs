@@ -18,6 +18,8 @@ using Termina.Input;
 using Termina.Terminal;
 using Xunit;
 
+using Netclaw.Client;
+
 namespace Netclaw.Cli.Tests.Tui.Config;
 
 public sealed class SecurityAccessNavigationTests : IDisposable

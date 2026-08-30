@@ -5,7 +5,7 @@
 // -----------------------------------------------------------------------
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using Netclaw.Cli.Json;
+using Netclaw.Client;
 
 namespace Netclaw.Cli.Secrets;
 

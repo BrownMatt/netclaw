@@ -16,6 +16,8 @@ using R3;
 using Xunit;
 using static Netclaw.Actors.Sessions.SessionProtocol;
 
+using Netclaw.Client;
+
 namespace Netclaw.Cli.Tests.Cli;
 
 public sealed class DaemonClientSessionTests

@@ -7,6 +7,8 @@ using System.Net.Http.Json;
 using Netclaw.Cli.Config;
 using Netclaw.Configuration;
 
+using Netclaw.Client;
+
 namespace Netclaw.Cli.Daemon;
 
 /// <summary>

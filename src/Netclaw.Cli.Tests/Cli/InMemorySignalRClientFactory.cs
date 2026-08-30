@@ -9,6 +9,8 @@ using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.Hosting;
 using Netclaw.Cli.Daemon;
 
+using Netclaw.Client;
+
 namespace Netclaw.Cli.Tests.Cli;
 
 /// <summary>

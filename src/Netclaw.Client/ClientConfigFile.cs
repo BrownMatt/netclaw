@@ -4,12 +4,11 @@
 // </copyright>
 // -----------------------------------------------------------------------
 using System.Text.Json;
-using Netclaw.Cli.Json;
 using Netclaw.Configuration;
 
-namespace Netclaw.Cli.Config;
+namespace Netclaw.Client;
 
-internal sealed class ClientConfigFile
+public sealed class ClientConfigFile
 {
     public string? Endpoint { get; init; }
 

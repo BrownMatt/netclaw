@@ -7,7 +7,7 @@ using System.Collections.Immutable;
 using System.Text.Json;
 using Netclaw.Cli.Config;
 using Netclaw.Cli.Daemon;
-using Netclaw.Cli.Json;
+using Netclaw.Client;
 using Netclaw.Cli.Tui;
 using Netclaw.Configuration;
 using Netclaw.Tools;

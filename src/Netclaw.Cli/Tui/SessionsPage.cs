@@ -11,6 +11,8 @@ using Termina.Reactive;
 using Termina.Rendering;
 using Termina.Terminal;
 
+using Netclaw.Client;
+
 namespace Netclaw.Cli.Tui;
 
 /// <summary>

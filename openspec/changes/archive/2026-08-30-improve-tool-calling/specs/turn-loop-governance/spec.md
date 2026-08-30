@@ -41,9 +41,10 @@ does today.
 
 ### Requirement: Per-response thinking cap
 
-The session SHALL enforce a configurable cap on the number of thinking tokens
-accepted within a single streamed model response. The cap SHALL apply for
-every provider type.
+The session SHALL enforce a configurable cap on the number of thinking
+characters accepted within a single streamed model response. The unit is
+characters because providers do not expose token counts mid-stream. The cap
+SHALL apply for every provider type.
 
 When a response reaches the cap, the session SHALL:
 
@@ -58,7 +59,7 @@ session SHALL end the turn through the existing completion path and SHALL
 deliver an operator-visible message that names the cap as the cause.
 
 The session SHALL write one log record per cap breach. The record SHALL
-include the model id and the thinking-token count.
+include the model id, the thinking-character count, and the delta count.
 
 A configuration setting SHALL hold the cap value, and a switch SHALL disable
 the cap. The switch defaults to enabled. When the switch is disabled, the
@@ -67,8 +68,8 @@ session SHALL accept unbounded thinking, which is today's behavior.
 #### Scenario: Cap breach cancels and re-prompts once
 
 - **GIVEN** the thinking cap is enabled with value N
-- **WHEN** a streamed response accumulates N thinking tokens without a tool
-  call or final text
+- **WHEN** a streamed response accumulates N thinking characters without a
+  tool call or final text
 - **THEN** the session cancels the stream, keeps the accumulated thinking in
   the transcript, appends an act-or-report nudge, and invokes the model again
 
@@ -82,8 +83,8 @@ session SHALL accept unbounded thinking, which is today's behavior.
 #### Scenario: Breach is logged for cap sizing
 
 - **WHEN** any response reaches the thinking cap
-- **THEN** the session writes one log record with the model id and the
-  thinking-token count
+- **THEN** the session writes one log record with the model id, the
+  thinking-character count, and the delta count
 
 #### Scenario: Disabled cap preserves current behavior
 

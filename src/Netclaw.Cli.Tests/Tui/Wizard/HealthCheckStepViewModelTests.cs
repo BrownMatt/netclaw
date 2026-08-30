@@ -15,6 +15,8 @@ using Netclaw.Providers;
 using Netclaw.Tests.Utilities;
 using Xunit;
 
+using Netclaw.Client;
+
 namespace Netclaw.Cli.Tests.Tui.Wizard;
 
 public sealed class HealthCheckStepViewModelTests : IDisposable

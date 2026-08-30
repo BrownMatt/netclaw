@@ -8,6 +8,8 @@ using System.Text.Json.Serialization;
 using Netclaw.Actors.Reminders;
 using Netclaw.Cli.Daemon;
 
+using Netclaw.Client;
+
 namespace Netclaw.Cli.Reminder;
 
 /// <summary>

@@ -8,6 +8,8 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Netclaw.Configuration;
 
+using Netclaw.Client;
+
 namespace Netclaw.Cli.Daemon;
 
 /// <summary>

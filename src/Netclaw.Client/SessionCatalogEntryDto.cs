@@ -3,7 +3,7 @@
 //      Copyright (C) 2026 - 2026 Petabridge, LLC <https://petabridge.com>
 // </copyright>
 // -----------------------------------------------------------------------
-namespace Netclaw.Cli.Daemon;
+namespace Netclaw.Client;
 
 /// <summary>
 /// Client-side DTO matching the daemon's <c>SessionCatalogEntry</c> shape

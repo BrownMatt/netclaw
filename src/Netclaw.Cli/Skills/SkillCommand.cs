@@ -9,7 +9,7 @@ using Microsoft.Extensions.Configuration;
 using Netclaw.Actors.Skills;
 using Netclaw.Cli.Config;
 using Netclaw.Cli.Daemon;
-using Netclaw.Cli.Json;
+using Netclaw.Client;
 using Netclaw.Configuration;
 
 namespace Netclaw.Cli.Skills;

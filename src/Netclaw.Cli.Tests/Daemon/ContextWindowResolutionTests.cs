@@ -11,6 +11,8 @@ using Netclaw.Configuration;
 using Netclaw.Tests.Utilities;
 using Xunit;
 
+using Netclaw.Client;
+
 namespace Netclaw.Cli.Tests.Daemon;
 
 public sealed class ContextWindowResolutionTests

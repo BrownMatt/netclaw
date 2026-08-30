@@ -12,6 +12,8 @@ using Netclaw.Cli.Daemon;
 using Netclaw.Configuration;
 using Netclaw.Tests.Utilities;
 
+using Netclaw.Client;
+
 namespace Netclaw.Cli.Tests.Webhooks;
 
 /// <summary>

@@ -18,6 +18,8 @@ using Termina.Clipboard;
 using Termina.Input;
 using Termina.Reactive;
 
+using Netclaw.Client;
+
 namespace Netclaw.Cli.Tui;
 
 /// <summary>

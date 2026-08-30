@@ -6,6 +6,8 @@
 using Netclaw.Cli.Daemon;
 using R3;
 
+using Netclaw.Client;
+
 namespace Netclaw.Cli.Tui.Wizard.Steps;
 
 /// <summary>

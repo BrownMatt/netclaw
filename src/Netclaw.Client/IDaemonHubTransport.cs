@@ -5,7 +5,7 @@
 // -----------------------------------------------------------------------
 using Microsoft.AspNetCore.SignalR.Client;
 
-namespace Netclaw.Cli.Daemon;
+namespace Netclaw.Client;
 
 /// <summary>
 /// The transport seam under <see cref="DaemonClient"/>. It hides the concrete
@@ -19,7 +19,7 @@ namespace Netclaw.Cli.Daemon;
 /// <see cref="Closed"/>, so this transport carries no reconnect policy of its
 /// own — the real adapter disables SignalR auto-reconnect on purpose.
 /// </remarks>
-internal interface IDaemonHubTransport : IAsyncDisposable
+public interface IDaemonHubTransport : IAsyncDisposable
 {
     /// <summary>True when the transport currently has a live connection.</summary>
     bool IsConnected { get; }
@@ -54,7 +54,7 @@ internal interface IDaemonHubTransport : IAsyncDisposable
 /// reconnect authority inside SignalR would race the owner for the one
 /// connection — the exact defect this design removes.
 /// </remarks>
-internal sealed class SignalRDaemonHubTransport : IDaemonHubTransport
+public sealed class SignalRDaemonHubTransport : IDaemonHubTransport
 {
     private readonly HubConnection _connection;
 

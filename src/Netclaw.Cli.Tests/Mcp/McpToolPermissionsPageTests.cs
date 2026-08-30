@@ -17,6 +17,8 @@ using Termina.Rendering;
 using Termina.Terminal;
 using Xunit;
 
+using Netclaw.Client;
+
 namespace Netclaw.Cli.Tests.Mcp;
 
 public sealed class McpToolPermissionsPageTests : IDisposable

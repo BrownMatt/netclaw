@@ -13,6 +13,8 @@ using Netclaw.Providers.OAuth;
 using Netclaw.Tools;
 using R3;
 
+using Netclaw.Client;
+
 namespace Netclaw.Cli.Tui;
 
 /// <summary>

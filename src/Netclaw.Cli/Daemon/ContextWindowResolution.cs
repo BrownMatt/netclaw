@@ -5,6 +5,8 @@
 // -----------------------------------------------------------------------
 using Netclaw.Configuration;
 
+using Netclaw.Client;
+
 namespace Netclaw.Cli.Daemon;
 
 /// <summary>

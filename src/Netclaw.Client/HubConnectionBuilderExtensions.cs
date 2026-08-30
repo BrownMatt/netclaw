@@ -5,7 +5,7 @@
 // -----------------------------------------------------------------------
 using Microsoft.AspNetCore.SignalR.Client;
 
-namespace Netclaw.Cli.Daemon;
+namespace Netclaw.Client;
 
 /// <summary>
 /// Extension methods for <see cref="HubConnectionBuilder"/> to support

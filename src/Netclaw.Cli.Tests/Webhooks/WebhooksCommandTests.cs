@@ -7,7 +7,7 @@ using System.Net;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Json.Schema;
-using Netclaw.Cli.Json;
+using Netclaw.Client;
 using Netclaw.Cli.Webhooks;
 using Netclaw.Configuration;
 using Netclaw.Tests.Utilities;

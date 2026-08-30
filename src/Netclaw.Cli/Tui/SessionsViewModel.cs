@@ -7,6 +7,8 @@ using Netclaw.Cli.Daemon;
 using R3;
 using Termina.Reactive;
 
+using Netclaw.Client;
+
 namespace Netclaw.Cli.Tui;
 
 /// <summary>

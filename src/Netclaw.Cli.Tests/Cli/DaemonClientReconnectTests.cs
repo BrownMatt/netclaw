@@ -9,6 +9,8 @@ using Netclaw.Cli.Daemon;
 using R3;
 using Xunit;
 
+using Netclaw.Client;
+
 namespace Netclaw.Cli.Tests.Cli;
 
 /// <summary>

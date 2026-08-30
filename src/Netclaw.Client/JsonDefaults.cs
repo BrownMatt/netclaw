@@ -6,13 +6,13 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-namespace Netclaw.Cli.Json;
+namespace Netclaw.Client;
 
 /// <summary>
 /// Shared <see cref="JsonSerializerOptions"/> presets for the CLI.
 /// Use these instead of defining per-command static instances.
 /// </summary>
-internal static class JsonDefaults
+public static class JsonDefaults
 {
     private static readonly JsonStringEnumConverter EnumConverter = new();
 
