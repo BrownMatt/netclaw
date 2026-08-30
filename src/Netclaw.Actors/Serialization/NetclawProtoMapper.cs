@@ -29,6 +29,10 @@ internal static class NetclawProtoMapper
         SerializableToolCall v => ToProto(v),
         TurnRecorded v => ToProto(v),
         SessionTitleSet v => ToProto(v),
+        SessionFolderGrantAdded v => ToProto(v),
+        SessionFolderGrantRemoved v => ToProto(v),
+        SessionAttachmentStored v => ToProto(v),
+        SessionAttachmentsConsumed v => ToProto(v),
         SessionCompacted v => ToProto(v),
         ToolBatchStarted v => ToProto(v),
         ToolCallRecorded v => ToProto(v),
@@ -193,6 +197,36 @@ internal static class NetclawProtoMapper
         SessionId = FromProto(proto.SessionId),
         Title = proto.Title,
         SetAtMs = proto.SetAtMs
+    };
+
+    // ── SessionFolderGrantAdded / SessionFolderGrantRemoved ──
+
+    internal static Proto.SessionFolderGrantAddedProto ToProto(SessionFolderGrantAdded evt) => new()
+    {
+        SessionId = ToProto(evt.SessionId),
+        Path = evt.Path,
+        GrantedAtMs = evt.GrantedAtMs
+    };
+
+    internal static SessionFolderGrantAdded FromProto(Proto.SessionFolderGrantAddedProto proto) => new()
+    {
+        SessionId = FromProto(proto.SessionId),
+        Path = proto.Path,
+        GrantedAtMs = proto.GrantedAtMs
+    };
+
+    internal static Proto.SessionFolderGrantRemovedProto ToProto(SessionFolderGrantRemoved evt) => new()
+    {
+        SessionId = ToProto(evt.SessionId),
+        Path = evt.Path,
+        RemovedAtMs = evt.RemovedAtMs
+    };
+
+    internal static SessionFolderGrantRemoved FromProto(Proto.SessionFolderGrantRemovedProto proto) => new()
+    {
+        SessionId = FromProto(proto.SessionId),
+        Path = proto.Path,
+        RemovedAtMs = proto.RemovedAtMs
     };
 
     // ── SessionCompacted ──
@@ -505,6 +539,7 @@ internal static class NetclawProtoMapper
         proto.History.AddRange(snap.History.Select(ToProto));
         proto.ActiveBackgroundJobs.AddRange(snap.ActiveBackgroundJobs.Select(ToProto));
         proto.AdoptedContextRecords.AddRange(snap.AdoptedContextRecords.Select(ToAdoptedContextSnapshotRecord));
+        proto.PendingAttachments.AddRange(snap.PendingAttachments.Select(ToProto));
         return proto;
     }
 
@@ -518,7 +553,62 @@ internal static class NetclawProtoMapper
         WorkingContext = proto.WorkingContext is not null ? FromProto(proto.WorkingContext) : null,
         History = proto.History.Select(FromProto).ToArray(),
         ActiveBackgroundJobs = proto.ActiveBackgroundJobs.Select(FromProto).ToArray(),
-        AdoptedContextRecords = proto.AdoptedContextRecords.Select(FromAdoptedContextSnapshotRecord).ToArray()
+        AdoptedContextRecords = proto.AdoptedContextRecords.Select(FromAdoptedContextSnapshotRecord).ToArray(),
+        PendingAttachments = proto.PendingAttachments.Select(FromProto).ToArray()
+    };
+
+    // ── PendingSessionAttachment / attachment events ──
+
+    internal static Proto.PendingSessionAttachmentProto ToProto(PendingSessionAttachment a) => new()
+    {
+        Id = a.Id,
+        FileName = a.FileName,
+        RelativePath = a.RelativePath,
+        MimeType = a.MimeType,
+        Category = a.Category,
+        SizeBytes = a.SizeBytes,
+        StoredAtMs = a.StoredAtMs
+    };
+
+    internal static PendingSessionAttachment FromProto(Proto.PendingSessionAttachmentProto proto) => new()
+    {
+        Id = proto.Id,
+        FileName = proto.FileName,
+        RelativePath = proto.RelativePath,
+        MimeType = proto.MimeType,
+        Category = proto.Category,
+        SizeBytes = proto.SizeBytes,
+        StoredAtMs = proto.StoredAtMs
+    };
+
+    internal static Proto.SessionAttachmentStoredProto ToProto(SessionAttachmentStored evt) => new()
+    {
+        SessionId = ToProto(evt.SessionId),
+        Attachment = ToProto(evt.Attachment)
+    };
+
+    internal static SessionAttachmentStored FromProto(Proto.SessionAttachmentStoredProto proto) => new()
+    {
+        SessionId = FromProto(proto.SessionId),
+        Attachment = proto.Attachment is not null ? FromProto(proto.Attachment) : new PendingSessionAttachment()
+    };
+
+    internal static Proto.SessionAttachmentsConsumedProto ToProto(SessionAttachmentsConsumed evt)
+    {
+        var proto = new Proto.SessionAttachmentsConsumedProto
+        {
+            SessionId = ToProto(evt.SessionId),
+            ConsumedAtMs = evt.ConsumedAtMs
+        };
+        proto.AttachmentIds.AddRange(evt.AttachmentIds);
+        return proto;
+    }
+
+    internal static SessionAttachmentsConsumed FromProto(Proto.SessionAttachmentsConsumedProto proto) => new()
+    {
+        SessionId = FromProto(proto.SessionId),
+        AttachmentIds = proto.AttachmentIds.ToArray(),
+        ConsumedAtMs = proto.ConsumedAtMs
     };
 
     private static Proto.SessionSnapshotProto.Types.AdoptedContextSnapshotRecord ToAdoptedContextSnapshotRecord(
@@ -592,13 +682,15 @@ internal static class NetclawProtoMapper
         proto.RecentFiles.AddRange(wc.RecentFiles);
         if (wc.ProjectDirectory is not null)
             proto.ProjectDirectory = wc.ProjectDirectory;
+        proto.GrantedFolders.AddRange(wc.GrantedFolders);
         return proto;
     }
 
     internal static WorkingContext FromProto(Proto.WorkingContextProto proto) => new()
     {
         RecentFiles = ImmutableList.CreateRange(proto.RecentFiles),
-        ProjectDirectory = proto.HasProjectDirectory ? proto.ProjectDirectory : null
+        ProjectDirectory = proto.HasProjectDirectory ? proto.ProjectDirectory : null,
+        GrantedFolders = ImmutableList.CreateRange(proto.GrantedFolders)
     };
 
     // ── ReminderDelivery ──

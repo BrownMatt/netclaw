@@ -102,6 +102,39 @@ message SessionTitleSetProto {
   int64 set_at_ms = 3;
 }
 
+message PendingSessionAttachmentProto {
+  string id = 1;
+  string file_name = 2;
+  string relative_path = 3;
+  string mime_type = 4;
+  string category = 5;
+  int64 size_bytes = 6;
+  int64 stored_at_ms = 7;
+}
+
+message SessionAttachmentStoredProto {
+  SessionIdProto session_id = 1;
+  PendingSessionAttachmentProto attachment = 2;
+}
+
+message SessionAttachmentsConsumedProto {
+  SessionIdProto session_id = 1;
+  repeated string attachment_ids = 2;
+  int64 consumed_at_ms = 3;
+}
+
+message SessionFolderGrantAddedProto {
+  SessionIdProto session_id = 1;
+  string path = 2;
+  int64 granted_at_ms = 3;
+}
+
+message SessionFolderGrantRemovedProto {
+  SessionIdProto session_id = 1;
+  string path = 2;
+  int64 removed_at_ms = 3;
+}
+
 message SessionCompactedProto {
   SessionIdProto session_id = 1;
   string summary = 2;
@@ -270,6 +303,7 @@ message SessionSnapshotProto {
   repeated ActiveJobInfoProto active_background_jobs = 7;
   repeated AdoptedContextSnapshotRecord adopted_context_records = 8;
   reserved 9;
+  repeated PendingSessionAttachmentProto pending_attachments = 10;
 }
 
 // ── Session state ──
@@ -277,6 +311,7 @@ message SessionSnapshotProto {
 message WorkingContextProto {
   repeated string recent_files = 1;
   optional string project_directory = 2;
+  repeated string granted_folders = 3;
 }
 
 // ── Channel delivery target (top-level, reusable) ──

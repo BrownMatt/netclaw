@@ -170,6 +170,45 @@ public sealed class SerializationRoundTripTests : TestKit
     }
 
     [Fact]
+    public void Folder_grant_output_round_trips_through_the_transport_DTO()
+    {
+        var original = new FolderGrantOutput
+        {
+            SessionId = new SessionId("test/wire"),
+            Path = "/home/user/projects/alpha",
+            IsGranted = true,
+            GrantedFolders = ["/home/user/projects/alpha", "/home/user/projects/beta"]
+        };
+
+        var dto = SessionOutputDtoMapper.ToDto(original);
+        Assert.Equal(SessionOutputTypes.FolderGrant, dto.Type);
+
+        var result = Assert.IsType<FolderGrantOutput>(SessionOutputDtoMapper.FromDto(dto));
+
+        Assert.Equal("/home/user/projects/alpha", result.Path);
+        Assert.True(result.IsGranted);
+        Assert.Equal(original.GrantedFolders, result.GrantedFolders);
+    }
+
+    [Fact]
+    public void Folder_grant_removal_round_trips_with_empty_list()
+    {
+        var original = new FolderGrantOutput
+        {
+            SessionId = new SessionId("test/wire"),
+            Path = "/home/user/projects/alpha",
+            IsGranted = false,
+            GrantedFolders = []
+        };
+
+        var result = Assert.IsType<FolderGrantOutput>(
+            SessionOutputDtoMapper.FromDto(SessionOutputDtoMapper.ToDto(original)));
+
+        Assert.False(result.IsGranted);
+        Assert.Empty(result.GrantedFolders);
+    }
+
+    [Fact]
     public void TurnRecorded_round_trips_with_null_source_ids()
     {
         var original = new TurnRecorded
@@ -356,6 +395,72 @@ public sealed class SerializationRoundTripTests : TestKit
 
         Assert.Null(result.ProjectDirectory);
         Assert.Single(result.RecentFiles);
+    }
+
+    [Fact]
+    public void WorkingContext_round_trips_with_granted_folders()
+    {
+        var original = WorkingContext.Empty
+            .WithProjectDirectory("/home/user/akadonic")
+            .WithGrantedFolder("/home/user/projects/alpha")
+            .WithGrantedFolder("/home/user/projects/beta");
+
+        var result = RoundTrip(original);
+
+        Assert.Equal(
+            new[] { "/home/user/projects/alpha", "/home/user/projects/beta" },
+            result.GrantedFolders);
+        Assert.Equal("/home/user/akadonic", result.ProjectDirectory);
+    }
+
+    [Fact]
+    public void WorkingContext_legacy_bytes_without_granted_folders_recover_with_empty_grants()
+    {
+        // Byte-level legacy fixture: a snapshot written before GrantedFolders
+        // existed carries only field 1 (recent_files) and field 2
+        // (project_directory) on the wire. This pins those field numbers —
+        // renumbering them would silently corrupt old snapshots — and proves
+        // an old snapshot recovers with no grants rather than an error.
+        var stream = new MemoryStream();
+        var output = new CodedOutputStream(stream);
+        output.WriteTag(1, WireFormat.WireType.LengthDelimited);
+        output.WriteString("src/Rect.cs");
+        output.WriteTag(2, WireFormat.WireType.LengthDelimited);
+        output.WriteString("/home/user/akadonic");
+        output.Flush();
+
+        var proto = Netclaw.Actors.Serialization.Proto.WorkingContextProto.Parser.ParseFrom(stream.ToArray());
+        var result = NetclawProtoMapper.FromProto(proto);
+
+        Assert.Equal(new[] { "src/Rect.cs" }, result.RecentFiles);
+        Assert.Equal("/home/user/akadonic", result.ProjectDirectory);
+        Assert.Empty(result.GrantedFolders);
+    }
+
+    [Fact]
+    public void WorkingContext_granted_folders_use_a_new_field_number()
+    {
+        // Rollback safety: a rolled-back build parses granted_folders as an
+        // unknown field and ignores it (protobuf wire contract) — but only if
+        // the new data lives in a NEW field number. Assert the new-writer
+        // bytes keep fields 1 and 2 unchanged and put grants in field 3.
+        var proto = NetclawProtoMapper.ToProto(
+            WorkingContext.Empty
+                .AddRecentFile("src/Rect.cs")
+                .WithProjectDirectory("/home/user/akadonic")
+                .WithGrantedFolder("/home/user/projects/alpha"));
+        var bytes = proto.ToByteArray();
+
+        var input = new CodedInputStream(bytes);
+        var seenFields = new List<int>();
+        uint tag;
+        while ((tag = input.ReadTag()) != 0)
+        {
+            seenFields.Add(WireFormat.GetTagFieldNumber(tag));
+            input.SkipLastField();
+        }
+
+        Assert.Equal(new[] { 1, 2, 3 }, seenFields);
     }
 
     [Fact]

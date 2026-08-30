@@ -74,6 +74,13 @@ public sealed record WorkingContextSnapshot
         if (WorkingContext.ProjectDirectory is not null)
             sb.Append("\nproject_dir: ").Append(WorkingContext.ProjectDirectory);
 
+        if (!WorkingContext.GrantedFolders.IsEmpty)
+        {
+            sb.Append("\ngranted_folders:");
+            foreach (var path in WorkingContext.GrantedFolders)
+                sb.Append("\n  - ").Append(path);
+        }
+
         if (!WorkingContext.RecentFiles.IsEmpty)
         {
             sb.Append("\nrecent_files:");

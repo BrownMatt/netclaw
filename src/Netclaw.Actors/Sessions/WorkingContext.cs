@@ -15,13 +15,17 @@ namespace Netclaw.Actors.Sessions;
 /// actor recovery, and daemon restart without depending on the observer LLM
 /// to reconstruct it.
 ///
-/// Carries two fields:
+/// Carries three fields:
 /// - <see cref="RecentFiles"/>: bounded ring buffer of file paths the agent
 ///   has recently read/written/edited. Most-recent-first, deduped, capped at
 ///   <see cref="MaxRecentFiles"/>.
 /// - <see cref="ProjectDirectory"/>: optional absolute path to the project
 ///   root the session is working on. Set via <c>set_working_directory</c>
 ///   tool, persisted across crash/restart. Null means "no project selected."
+/// - <see cref="GrantedFolders"/>: operator-granted folder roots for
+///   first-party file tools. A grant lives for the session life; removal
+///   revokes immediately. Grants never join the shell approval safe-space
+///   set — <c>set_working_directory</c> stays the only shell-trust gesture.
 /// </summary>
 public sealed record WorkingContext : INetclawSerializableMessage
 {
@@ -38,12 +42,17 @@ public sealed record WorkingContext : INetclawSerializableMessage
 
     public string? ProjectDirectory { get; init; }
 
+    public ImmutableList<string> GrantedFolders { get; init; } =
+        [];
+
     /// <summary>
-    /// Returns true when there is nothing to report — no recent files and
-    /// no project directory. Consumers use this to suppress the
-    /// <c>[working-context]</c> block entirely.
+    /// Returns true when there is nothing to report — no recent files, no
+    /// project directory, and no granted folders. Consumers use this to
+    /// suppress the <c>[working-context]</c> block entirely; SessionState
+    /// also drops an empty context from snapshots, so a grants-only context
+    /// must count as non-empty or grants would not persist.
     /// </summary>
-    public bool IsEmpty => RecentFiles.IsEmpty && ProjectDirectory is null;
+    public bool IsEmpty => RecentFiles.IsEmpty && ProjectDirectory is null && GrantedFolders.IsEmpty;
 
     /// <summary>
     /// Return a new <see cref="WorkingContext"/> with <see cref="ProjectDirectory"/>
@@ -106,6 +115,41 @@ public sealed record WorkingContext : INetclawSerializableMessage
         }
 
         return this with { RecentFiles = builder.ToImmutable() };
+    }
+
+    /// <summary>
+    /// Add an operator-granted folder root. Rejects paths with control
+    /// characters for the same prompt-injection reasons as
+    /// <see cref="AddRecentFile"/>. Returns the same instance when the path
+    /// is rejected or already granted, so <c>ReferenceEquals</c> callers can
+    /// short-circuit. The caller (the session actor) validates existence and
+    /// normalizes the path before this method runs.
+    /// </summary>
+    public WorkingContext WithGrantedFolder(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return this;
+
+        if (path.AsSpan().IndexOfAny('\n', '\r', '\0') >= 0)
+            return this;
+
+        if (GrantedFolders.Contains(path, StringComparer.Ordinal))
+            return this;
+
+        return this with { GrantedFolders = GrantedFolders.Add(path) };
+    }
+
+    /// <summary>
+    /// Remove an operator-granted folder root. Returns the same instance
+    /// when the path is not in the grant list.
+    /// </summary>
+    public WorkingContext WithoutGrantedFolder(string path)
+    {
+        var index = GrantedFolders.IndexOf(path, StringComparer.Ordinal);
+        if (index < 0)
+            return this;
+
+        return this with { GrantedFolders = GrantedFolders.RemoveAt(index) };
     }
 
     /// <summary>
