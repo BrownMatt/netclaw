@@ -27,7 +27,7 @@ public interface IUiDispatcher
 public sealed record PendingAttachmentChip(string AttachmentId, string FileName);
 
 /// <summary>
-/// The application shell: connection lifecycle, the read-only session list,
+/// The application shell: connection lifecycle, the managed session list,
 /// the attached chat session, queue-and-flush input, and the <c>+</c> flows
 /// (attach file, grant folder). All session-output handling is delegated to
 /// <see cref="ChatSessionViewModel"/>; this class owns routing and transport.
@@ -41,6 +41,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     private readonly string _endpoint;
     private readonly List<string> _queue = [];
     private bool _recovering;
+    private bool _connectLoopRunning;
     private readonly IDisposable _outputSubscription;
     private readonly IDisposable _connectionSubscription;
     private bool _sessionEnsured;
@@ -60,10 +61,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
 
     public bool HasQueued => QueuedCount > 0;
 
-    [ObservableProperty]
-    private SessionListItemViewModel? _selectedSession;
-
-    public SessionListViewModel SessionList { get; } = new();
+    public SessionListViewModel SessionList { get; }
 
     public ObservableCollection<PendingAttachmentChip> PendingAttachments { get; } = [];
 
@@ -72,6 +70,12 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         _service = service;
         _dispatcher = dispatcher;
         _endpoint = endpoint;
+        SessionList = new SessionListViewModel(new SessionManagementActions(
+            Rename: (sessionId, title) => _service.RenameSessionAsync(sessionId, title),
+            SetPinned: (sessionId, pinned) => _service.SetSessionFlagsAsync(sessionId, pinned: pinned),
+            SetArchived: (sessionId, archived) => _service.SetSessionFlagsAsync(sessionId, archived: archived),
+            Delete: sessionId => _service.DeleteSessionAsync(sessionId),
+            Refresh: RefreshSessionListAsync));
 
         _outputSubscription = _service.SessionOutput
             .Subscribe(this, static (output, self) =>
@@ -116,10 +120,17 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         {
             var sessionId = await _service.ResumeSessionAsync(item.SessionId);
             AdoptSession(sessionId);
+            // Resume is a foreground command, so a successful attach proves
+            // the transport and a session — without this, a send after a
+            // deleted-session recovery would queue forever.
+            _sessionEnsured = true;
             Status = $"Connected - {_endpoint}";
             // A queued message (e.g. from a send the daemon rejected) flushes
             // on re-attach too, not only on transport reconnect.
             await FlushQueueAsync();
+            // The attach may be the first traffic after a reconnect; the
+            // cached list can be stale, so refresh it from the daemon.
+            await RefreshSessionListAsync();
         }
         catch (Exception ex)
         {
@@ -188,20 +199,34 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
 
     private async Task ConnectLoopAsync()
     {
-        while (true)
+        // Both call sites run on the UI thread (constructor and dispatched
+        // connection events), so this flag needs no lock. It stops a second
+        // loop from racing the first when connection events arrive while the
+        // startup loop is still retrying.
+        if (_connectLoopRunning)
+            return;
+        _connectLoopRunning = true;
+        try
         {
-            try
+            while (true)
             {
-                await _service.ConnectAsync();
-                await EnsureSessionAndFlushAsync();
-                await RefreshSessionListAsync();
-                return;
+                try
+                {
+                    await _service.ConnectAsync();
+                    await EnsureSessionAndFlushAsync();
+                    await RefreshSessionListAsync();
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    _dispatcher.Post(() => Status = $"Disconnected - retrying {_endpoint} ({ex.Message})");
+                    await Task.Delay(ConnectRetryDelay);
+                }
             }
-            catch (Exception ex)
-            {
-                _dispatcher.Post(() => Status = $"Disconnected - retrying {_endpoint} ({ex.Message})");
-                await Task.Delay(ConnectRetryDelay);
-            }
+        }
+        finally
+        {
+            _dispatcher.Post(() => _connectLoopRunning = false);
         }
     }
 
@@ -357,6 +382,21 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         if (output is SessionTitleOutput title)
             SessionList.ApplyTitle(output.SessionId.Value, title.Title);
 
+        if (output is SessionDeletedOutput)
+        {
+            // The attached session's chat pane clears; the list refreshes
+            // for a deletion of any session (another client may have done it).
+            if (Chat is not null && string.Equals(Chat.SessionId, output.SessionId.Value, StringComparison.Ordinal))
+            {
+                Chat = null;
+                _sessionEnsured = false;
+                Status = "Session deleted.";
+            }
+
+            _ = RefreshSessionListAsync();
+            return;
+        }
+
         // Everything else renders only for the attached session — a
         // detached session's events (approvals included) never reach a
         // card the operator could answer.
@@ -392,6 +432,17 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
             if (_queue.Count > 0)
                 _ = EnsureSessionAndFlushAsync();
             _ = RefreshSessionListAsync();
+        }
+
+        // The client's reconnect authority only re-attaches an existing
+        // session; with none ensured (the attached session was deleted)
+        // it leaves recovery "for the next command" and no command ever
+        // comes. Rearm the connect loop here so the GUI recovers on its
+        // own instead of showing "Reconnecting..." forever.
+        if (!_sessionEnsured
+            && evt.State is DaemonConnectionState.TransportClosed or DaemonConnectionState.Disconnected)
+        {
+            _ = ConnectLoopAsync();
         }
     }
 }

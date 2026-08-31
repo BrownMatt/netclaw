@@ -51,6 +51,12 @@ public sealed record SessionState
     public string? Title { get; init; }
 
     /// <summary>
+    /// True when the title came from a manual operator rename. While set,
+    /// the automatic title generator must not replace the title.
+    /// </summary>
+    public bool TitleLocked { get; init; }
+
+    /// <summary>
     /// Durable state for "what the agent is currently working on" — recent
     /// files, open goals, and progress markers. Survives compaction, actor
     /// recovery, and daemon restart. Injected as a <c>[working-context]</c>
@@ -150,7 +156,7 @@ public sealed record SessionState
 
     public SessionState Apply(SessionTitleSet evt)
     {
-        return this with { Title = evt.Title };
+        return this with { Title = evt.Title, TitleLocked = evt.Locked };
     }
 
     public SessionState Apply(SessionBackgroundJobsReaped evt)
@@ -467,6 +473,7 @@ public sealed record SessionState
             History = new List<SerializableChatMessage>(History),
             TurnCount = TurnCount,
             Title = Title,
+            TitleLocked = TitleLocked,
             WorkingContext = WorkingContext.IsEmpty ? null : WorkingContext,
             PendingAttachments = [.. PendingAttachments],
             ActiveBackgroundJobs = [.. ActiveBackgroundJobs.Values],
@@ -528,6 +535,7 @@ public sealed record SessionState
             History = ImmutableList.CreateRange(snapshot.History),
             TurnCount = snapshot.TurnCount,
             Title = snapshot.Title,
+            TitleLocked = snapshot.TitleLocked,
             WorkingContext = snapshot.WorkingContext ?? WorkingContext.Empty,
             PendingAttachments = ImmutableList.CreateRange(snapshot.PendingAttachments),
             ActiveBackgroundJobs = activeJobs,

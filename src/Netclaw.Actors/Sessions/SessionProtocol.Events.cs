@@ -267,6 +267,13 @@ public static partial class SessionProtocol
 
         public string Title { get; init; } = string.Empty;
 
+        /// <summary>
+        /// True for a manual operator rename. A locked title wins over the
+        /// automatic title generator. Old persisted events decode as false
+        /// (proto3 default), which is correct — they were all generated.
+        /// </summary>
+        public bool Locked { get; init; }
+
         public long SetAtMs { get; init; }
 
         public DateTimeOffset SetAt => DateTimeOffset.FromUnixTimeMilliseconds(SetAtMs);

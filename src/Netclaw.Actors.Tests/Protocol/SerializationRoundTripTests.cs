@@ -70,6 +70,59 @@ public sealed class SerializationRoundTripTests : TestKit
     }
 
     [Fact]
+    public void SessionTitleSet_round_trips_the_locked_flag()
+    {
+        var original = new SessionTitleSet
+        {
+            SessionId = new SessionId("signalr/rename-test"),
+            Title = "My renamed session",
+            Locked = true,
+            SetAtMs = 1_708_531_200_000
+        };
+
+        var result = RoundTrip(original);
+
+        Assert.Equal(original.Title, result.Title);
+        Assert.True(result.Locked);
+        Assert.Equal(original.SetAtMs, result.SetAtMs);
+    }
+
+    [Fact]
+    public void SessionTitleSet_persisted_before_the_locked_field_decodes_unlocked()
+    {
+        // Old journal bytes have no locked field; proto3 must default it to
+        // false so every pre-change (generated) title stays replaceable.
+        var legacy = new Serialization.Proto.SessionTitleSetProto
+        {
+            SessionId = new Serialization.Proto.SessionIdProto { Value = "signalr/legacy" },
+            Title = "Generated title",
+            SetAtMs = 42
+        }.ToByteArray();
+
+        var serializer = (SerializerWithStringManifest)Sys.Serialization.FindSerializerForType(typeof(SessionTitleSet));
+        var result = (SessionTitleSet)serializer.FromBinary(legacy, serializer.Manifest(new SessionTitleSet()));
+
+        Assert.False(result.Locked);
+        Assert.Equal("Generated title", result.Title);
+    }
+
+    [Fact]
+    public void SessionSnapshot_round_trips_the_title_lock()
+    {
+        var original = new SessionSnapshot
+        {
+            TurnCount = 3,
+            Title = "My renamed session",
+            TitleLocked = true
+        };
+
+        var result = RoundTrip(original);
+
+        Assert.Equal(original.Title, result.Title);
+        Assert.True(result.TitleLocked);
+    }
+
+    [Fact]
     public void SerializableChatMessage_round_trips_user_message()
     {
         var original = new SerializableChatMessage

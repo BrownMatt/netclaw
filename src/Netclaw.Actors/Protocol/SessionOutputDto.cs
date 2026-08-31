@@ -25,6 +25,7 @@ public static class SessionOutputTypes
     public const string SessionTitle = "session_title";
     public const string FolderGrant = "folder_grant";
     public const string ModelOverride = "model_override";
+    public const string SessionDeleted = "session_deleted";
     public const string Error = "error";
     public const string File = "file";
     public const string SubAgent = "subagent";

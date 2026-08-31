@@ -38,6 +38,12 @@ public interface IDaemonSessionService
 
     Task<List<SessionCatalogEntryDto>> ListSessionsAsync(CancellationToken cancellationToken = default);
 
+    Task RenameSessionAsync(string sessionId, string title, CancellationToken cancellationToken = default);
+
+    Task SetSessionFlagsAsync(string sessionId, bool? pinned = null, bool? archived = null, CancellationToken cancellationToken = default);
+
+    Task DeleteSessionAsync(string sessionId, CancellationToken cancellationToken = default);
+
     Task<ModelCatalogResponseDto?> GetModelCatalogAsync(CancellationToken cancellationToken = default);
 
     Task SetSessionModelAsync(string provider, string modelId, CancellationToken cancellationToken = default);
@@ -95,6 +101,15 @@ public sealed class DaemonSessionService : IDaemonSessionService
 
     public Task<List<SessionCatalogEntryDto>> ListSessionsAsync(CancellationToken cancellationToken = default)
         => _api.ListSessionsAsync(limit: 100, ct: cancellationToken);
+
+    public Task RenameSessionAsync(string sessionId, string title, CancellationToken cancellationToken = default)
+        => _api.RenameSessionAsync(sessionId, title, cancellationToken);
+
+    public Task SetSessionFlagsAsync(string sessionId, bool? pinned = null, bool? archived = null, CancellationToken cancellationToken = default)
+        => _api.SetSessionFlagsAsync(sessionId, pinned, archived, cancellationToken);
+
+    public Task DeleteSessionAsync(string sessionId, CancellationToken cancellationToken = default)
+        => _api.DeleteSessionAsync(sessionId, cancellationToken);
 
     public Task<ModelCatalogResponseDto?> GetModelCatalogAsync(CancellationToken cancellationToken = default)
         => _api.GetModelsAsync(cancellationToken);

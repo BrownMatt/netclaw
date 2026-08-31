@@ -7,23 +7,98 @@
         Title="Netclaw"
         Width="1100" Height="720">
 
+  <Window.Resources>
+    <!-- Shared row template for both session sections. Right-click opens
+         the management menu; Pin/Unpin label follows the pin state. -->
+    <DataTemplate x:Key="SessionRowTemplate" DataType="vm:SessionListItemViewModel">
+      <StackPanel Margin="0,2" Background="Transparent">
+        <StackPanel.ContextMenu>
+          <ContextMenu>
+            <MenuItem Header="Rename"
+                      Command="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).SessionList.BeginRenameCommand}"
+                      CommandParameter="{Binding}" />
+            <MenuItem Header="Pin/Unpin"
+                      Command="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).SessionList.TogglePinCommand}"
+                      CommandParameter="{Binding}" />
+            <MenuItem Header="Archive"
+                      Command="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).SessionList.ArchiveCommand}"
+                      CommandParameter="{Binding}" />
+            <MenuItem Header="Delete..."
+                      Command="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).SessionList.BeginDeleteCommand}"
+                      CommandParameter="{Binding}" />
+          </ContextMenu>
+        </StackPanel.ContextMenu>
+        <TextBlock Text="{Binding DisplayTitle}" TextTrimming="CharacterEllipsis" />
+        <TextBlock Text="{Binding Channel}" Opacity="0.5" FontSize="11" />
+      </StackPanel>
+    </DataTemplate>
+  </Window.Resources>
+
   <Grid ColumnDefinitions="240,*" Margin="8">
 
-    <!-- Left: read-only session list -->
+    <!-- Left: managed session list — pinned on top, context-menu actions,
+         confirmation-driven updates (the list refreshes after the daemon
+         acks; a rejection shows ActionError and keeps the list). -->
     <DockPanel Grid.Column="0" Margin="0,0,8,0">
       <TextBlock DockPanel.Dock="Top" Text="Sessions" FontWeight="Bold" Margin="4,0,0,6" />
-      <ListBox ItemsSource="{Binding SessionList.Sessions}"
-               SelectedItem="{Binding SelectedSession, Mode=TwoWay}"
-               SelectionChanged="OnSessionSelectionChanged">
-        <ListBox.ItemTemplate>
-          <DataTemplate DataType="vm:SessionListItemViewModel">
-            <StackPanel Margin="0,2">
-              <TextBlock Text="{Binding DisplayTitle}" TextTrimming="CharacterEllipsis" />
-              <TextBlock Text="{Binding Channel}" Opacity="0.5" FontSize="11" />
-            </StackPanel>
-          </DataTemplate>
-        </ListBox.ItemTemplate>
-      </ListBox>
+
+      <!-- Rename dialog -->
+      <Border DockPanel.Dock="Top" IsVisible="{Binding SessionList.IsRenameOpen}"
+              BorderBrush="#888888" BorderThickness="1" CornerRadius="6"
+              Padding="8" Margin="0,0,0,6">
+        <StackPanel Spacing="6">
+          <TextBlock Text="Rename session" FontWeight="Bold" FontSize="12" />
+          <TextBox Text="{Binding SessionList.RenameText}">
+            <TextBox.KeyBindings>
+              <KeyBinding Gesture="Enter" Command="{Binding SessionList.ConfirmRenameCommand}" />
+            </TextBox.KeyBindings>
+          </TextBox>
+          <StackPanel Orientation="Horizontal" Spacing="6">
+            <Button Content="Rename" FontSize="12" Command="{Binding SessionList.ConfirmRenameCommand}" />
+            <Button Content="Cancel" FontSize="12" Command="{Binding SessionList.CancelRenameCommand}" />
+          </StackPanel>
+        </StackPanel>
+      </Border>
+
+      <!-- Delete confirmation: names the session, states permanence, and
+           sends nothing until the operator confirms. -->
+      <Border DockPanel.Dock="Top" IsVisible="{Binding SessionList.IsDeleteOpen}"
+              BorderBrush="#CC3333" BorderThickness="1" CornerRadius="6"
+              Padding="8" Margin="0,0,0,6">
+        <StackPanel Spacing="6">
+          <TextBlock FontSize="12" TextWrapping="Wrap">
+            <Run Text="Delete session '" /><Run Text="{Binding SessionList.DeleteTarget.DisplayTitle}" /><Run Text="'?" />
+          </TextBlock>
+          <TextBlock Text="This deletion is permanent. The history, files, and log of this session are removed."
+                     FontSize="11" Opacity="0.8" TextWrapping="Wrap" />
+          <StackPanel Orientation="Horizontal" Spacing="6">
+            <Button Content="Delete" FontSize="12" Foreground="#CC3333"
+                    Command="{Binding SessionList.ConfirmDeleteCommand}" />
+            <Button Content="Cancel" FontSize="12" Command="{Binding SessionList.CancelDeleteCommand}" />
+          </StackPanel>
+        </StackPanel>
+      </Border>
+
+      <!-- The daemon's rejection reason for a management action -->
+      <TextBlock DockPanel.Dock="Top" Text="{Binding SessionList.ActionError}"
+                 FontSize="11" Foreground="#CC5555" TextWrapping="Wrap" Margin="0,0,0,6"
+                 IsVisible="{Binding SessionList.ActionError, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+
+      <ScrollViewer>
+        <StackPanel>
+          <TextBlock Text="Pinned" FontSize="11" Opacity="0.6" Margin="4,0,0,4"
+                     IsVisible="{Binding SessionList.HasPinned}" />
+          <ListBox ItemsSource="{Binding SessionList.PinnedSessions}"
+                   SelectionChanged="OnSessionSelectionChanged"
+                   ItemTemplate="{StaticResource SessionRowTemplate}"
+                   IsVisible="{Binding SessionList.HasPinned}" Margin="0,0,0,6" />
+          <TextBlock Text="All sessions" FontSize="11" Opacity="0.6" Margin="4,0,0,4"
+                     IsVisible="{Binding SessionList.HasPinned}" />
+          <ListBox ItemsSource="{Binding SessionList.UnpinnedSessions}"
+                   SelectionChanged="OnSessionSelectionChanged"
+                   ItemTemplate="{StaticResource SessionRowTemplate}" />
+        </StackPanel>
+      </ScrollViewer>
     </DockPanel>
 
     <!-- Middle: chat -->

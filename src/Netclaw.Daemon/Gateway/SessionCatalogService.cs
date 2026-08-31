@@ -27,6 +27,7 @@ public sealed class SessionCatalogService : ISessionLifecycleObserver
     {
         Missing,
         Legacy,
+        MissingManagementColumns,
         Current
     }
 
@@ -267,9 +268,13 @@ public sealed class SessionCatalogService : ISessionLifecycleObserver
     }
 
     /// <summary>
-    /// List recent sessions, ordered by last activity descending.
+    /// List recent sessions, ordered by last activity descending. The
+    /// default listing excludes archived sessions; pass
+    /// <paramref name="includeArchived"/> to see them. <paramref name="pinnedOnly"/>
+    /// restricts the listing to pinned sessions.
     /// </summary>
-    public List<SessionCatalogEntry> ListRecent(int limit = 50, int offset = 0)
+    public List<SessionCatalogEntry> ListRecent(
+        int limit = 50, int offset = 0, bool includeArchived = false, bool pinnedOnly = false)
     {
         var entries = new List<SessionCatalogEntry>();
         limit = Math.Clamp(limit, 1, 100);
@@ -282,12 +287,20 @@ public sealed class SessionCatalogService : ISessionLifecycleObserver
 
             EnsureSchemaUpToDate(conn, _logger);
 
+            var where = new List<string>();
+            if (!includeArchived)
+                where.Add("archived = 0");
+            if (pinnedOnly)
+                where.Add("pinned = 1");
+
             using var cmd = conn.CreateCommand();
             cmd.CommandText =
-                """
+                $"""
                 SELECT persistence_id, channel, title, description, status, turn_count,
-                       created_at, last_activity, log_path, last_input_tokens
+                       created_at, last_activity, log_path, last_input_tokens,
+                       pinned, archived
                 FROM sessions
+                {(where.Count > 0 ? "WHERE " + string.Join(" AND ", where) : string.Empty)}
                 ORDER BY last_activity DESC
                 LIMIT $limit
                 OFFSET $offset
@@ -309,7 +322,9 @@ public sealed class SessionCatalogService : ISessionLifecycleObserver
                     CreatedAt = reader.GetInt64(6),
                     LastActivity = reader.GetInt64(7),
                     LogPath = reader.IsDBNull(8) ? null : reader.GetString(8),
-                    LastInputTokens = reader.IsDBNull(9) ? null : reader.GetInt64(9)
+                    LastInputTokens = reader.IsDBNull(9) ? null : reader.GetInt64(9),
+                    Pinned = reader.GetInt32(10) != 0,
+                    Archived = reader.GetInt32(11) != 0
                 });
             }
         }
@@ -319,6 +334,60 @@ public sealed class SessionCatalogService : ISessionLifecycleObserver
         }
 
         return entries;
+    }
+
+    /// <summary>
+    /// Sets the pinned flag. Returns false when the catalog does not know
+    /// the session — the caller must reject the operation loudly.
+    /// </summary>
+    public bool SetPinned(string sessionId, bool pinned)
+        => SetManagementFlag(sessionId, "pinned", pinned);
+
+    /// <summary>
+    /// Sets the archived flag. Returns false when the catalog does not know
+    /// the session — the caller must reject the operation loudly.
+    /// </summary>
+    public bool SetArchived(string sessionId, bool archived)
+        => SetManagementFlag(sessionId, "archived", archived);
+
+    /// <summary>
+    /// Removes the catalog row for a session as part of delete teardown.
+    /// Returns false when no row existed.
+    /// </summary>
+    public bool DeleteCatalogRow(string sessionId)
+    {
+        using var conn = new SqliteConnection(_connectionString);
+        conn.Open();
+
+        EnsureSchemaUpToDate(conn, _logger);
+
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "DELETE FROM sessions WHERE persistence_id = $pid";
+        cmd.Parameters.AddWithValue("$pid", $"session-{sessionId}");
+        return cmd.ExecuteNonQuery() > 0;
+    }
+
+    // The column name is one of two internal constants, never caller input.
+    private bool SetManagementFlag(string sessionId, string column, bool value)
+    {
+        try
+        {
+            using var conn = new SqliteConnection(_connectionString);
+            conn.Open();
+
+            EnsureSchemaUpToDate(conn, _logger);
+
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = $"UPDATE sessions SET {column} = $value WHERE persistence_id = $pid";
+            cmd.Parameters.AddWithValue("$value", value ? 1 : 0);
+            cmd.Parameters.AddWithValue("$pid", $"session-{sessionId}");
+            return cmd.ExecuteNonQuery() > 0;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to set {Column} for session {SessionId}", column, sessionId);
+            return false;
+        }
     }
 
     /// <summary>
@@ -416,7 +485,9 @@ public sealed class SessionCatalogService : ISessionLifecycleObserver
             description       TEXT,
             last_input_tokens INTEGER,
             log_path          TEXT,
-            metadata          TEXT
+            metadata          TEXT,
+            pinned            INTEGER NOT NULL DEFAULT 0,
+            archived          INTEGER NOT NULL DEFAULT 0
         )
         """;
 
@@ -440,6 +511,12 @@ public sealed class SessionCatalogService : ISessionLifecycleObserver
                 RunSql(conn, SessionsCreateTableDdl);
                 RunSql(conn, "CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions (status)");
                 RunSql(conn, "CREATE INDEX IF NOT EXISTS idx_sessions_last_activity ON sessions (last_activity)");
+                break;
+
+            case SessionsSchemaMode.MissingManagementColumns:
+                logger.LogInformation("Sessions table lacks management columns — adding pinned and archived");
+                RunSql(conn, "ALTER TABLE sessions ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0");
+                RunSql(conn, "ALTER TABLE sessions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0");
                 break;
 
             case SessionsSchemaMode.Legacy:
@@ -509,7 +586,11 @@ public sealed class SessionCatalogService : ISessionLifecycleObserver
             return SessionsSchemaMode.Missing;
 
         if (columns.Contains("persistence_id"))
-            return SessionsSchemaMode.Current;
+        {
+            return columns.Contains("pinned") && columns.Contains("archived")
+                ? SessionsSchemaMode.Current
+                : SessionsSchemaMode.MissingManagementColumns;
+        }
 
         if (columns.Contains("session_id"))
             return SessionsSchemaMode.Legacy;
@@ -533,4 +614,6 @@ public sealed class SessionCatalogEntry
     public required long LastActivity { get; init; }
     public string? LogPath { get; init; }
     public long? LastInputTokens { get; init; }
+    public bool Pinned { get; init; }
+    public bool Archived { get; init; }
 }

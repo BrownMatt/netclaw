@@ -124,6 +124,13 @@ public static class SessionOutputDtoMapper
             ModelOverrideId = msg.ModelId
         },
 
+        SessionDeletedOutput msg => new SessionOutputDto
+        {
+            Type = SessionOutputTypes.SessionDeleted,
+            SessionId = msg.SessionId.Value,
+            TimestampMs = msg.TimestampMs
+        },
+
         ErrorOutput msg => new SessionOutputDto
         {
             Type = SessionOutputTypes.Error,
@@ -321,6 +328,11 @@ public static class SessionOutputDtoMapper
                 TimestampMs = dto.TimestampMs,
                 Provider = dto.ModelOverrideProvider,
                 ModelId = dto.ModelOverrideId
+            },
+            SessionOutputTypes.SessionDeleted => new SessionDeletedOutput
+            {
+                SessionId = sessionId,
+                TimestampMs = dto.TimestampMs
             },
             SessionOutputTypes.Error => new ErrorOutput
             {

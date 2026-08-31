@@ -23,6 +23,8 @@ public sealed record SessionCatalogEntryDto
     public required long LastActivity { get; init; }
     public string? LogPath { get; init; }
     public long? LastInputTokens { get; init; }
+    public bool Pinned { get; init; }
+    public bool Archived { get; init; }
 
     /// <summary>
     /// The raw session ID for use with <c>EnsureSession</c>.

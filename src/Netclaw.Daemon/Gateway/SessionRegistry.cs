@@ -44,6 +44,11 @@ public sealed class SessionRegistry
     private readonly Dictionary<SessionId, Actors.Channels.ChannelType> _knownSessions = [];
     private readonly SemaphoreSlim _sessionMutationGate = new(1, 1);
 
+    // Sessions in delete teardown. Ensure/attach for these ids must fail
+    // loudly — the command pipeline creates actors on demand, so a revival
+    // mid-teardown would resurrect stores the teardown already removed.
+    private readonly HashSet<SessionId> _deleting = [];
+
     private readonly SessionConnectionMap _connections = new();
 
     public SessionRegistry(
@@ -121,6 +126,7 @@ public sealed class SessionRegistry
             if (!string.IsNullOrWhiteSpace(sessionId))
             {
                 var requestedSessionId = ParseSessionId(sessionId);
+                ThrowIfDeleting(requestedSessionId);
 
                 if (_knownSessions.ContainsKey(requestedSessionId))
                 {
@@ -172,6 +178,7 @@ public sealed class SessionRegistry
         try
         {
             ThrowIfIngressClosed();
+            ThrowIfDeleting(requestedSessionId);
 
             if (!_knownSessions.TryGetValue(requestedSessionId, out var channelType))
                 throw new HubException($"Session '{sessionId}' not found.");
@@ -458,6 +465,82 @@ public sealed class SessionRegistry
                 "Failed to send detach for connection {ConnectionId} to session {SessionId}.",
                 connectionId.Value, left.SessionId.Value);
         }
+    }
+
+    /// <summary>
+    /// Starts delete teardown for a session: blocks ensure/attach for the
+    /// id, forgets the session, detaches every connection, notifies each
+    /// detached client with a <c>session_deleted</c> output, and shuts down
+    /// the SignalR session binding. Call <see cref="EndTeardown"/> when the
+    /// teardown finishes, success or not.
+    /// </summary>
+    public async Task<IReadOnlyList<SignalRConnectionId>> BeginTeardownAsync(
+        string sessionId, Func<SignalRConnectionId, Task> notifyDeleted)
+    {
+        var requestedSessionId = ParseSessionId(sessionId);
+
+        await _sessionMutationGate.WaitAsync();
+        try
+        {
+            _deleting.Add(requestedSessionId);
+            _knownSessions.Remove(requestedSessionId);
+            var detached = _connections.RemoveSession(requestedSessionId);
+
+            foreach (var connection in detached)
+            {
+                try
+                {
+                    await notifyDeleted(connection);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex,
+                        "Failed to notify connection {ConnectionId} that session {SessionId} was deleted.",
+                        connection.Value, requestedSessionId.Value);
+                }
+            }
+
+            if (detached.Count > 0)
+            {
+                try
+                {
+                    var gateway = await _gatewayProvider.GetAsync();
+                    gateway.Tell(new ShutdownSignalRSession(requestedSessionId));
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex,
+                        "Failed to shut down the SignalR binding for deleted session {SessionId}.",
+                        requestedSessionId.Value);
+                }
+            }
+
+            return detached;
+        }
+        finally
+        {
+            _sessionMutationGate.Release();
+        }
+    }
+
+    /// <summary>Lifts the teardown block set by <see cref="BeginTeardownAsync"/>.</summary>
+    public async Task EndTeardownAsync(string sessionId)
+    {
+        await _sessionMutationGate.WaitAsync();
+        try
+        {
+            _deleting.Remove(new SessionId(sessionId));
+        }
+        finally
+        {
+            _sessionMutationGate.Release();
+        }
+    }
+
+    private void ThrowIfDeleting(SessionId sessionId)
+    {
+        if (_deleting.Contains(sessionId))
+            throw new HubException($"Session '{sessionId.Value}' is being deleted.");
     }
 
     public async Task ShutdownAsync(CancellationToken cancellationToken)

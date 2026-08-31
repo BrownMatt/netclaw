@@ -121,7 +121,13 @@ public sealed class DaemonClient : IAsyncDisposable
 
         _outputRegistration = _transport.On<SessionOutputDto>(
             "ReceiveOutput",
-            dto => _outputSubject.OnNext(FromDto(dto)));
+            dto =>
+            {
+                var output = FromDto(dto);
+                if (output is SessionDeletedOutput deleted)
+                    _mailbox.Writer.TryWrite(new SessionDeletedNotice(deleted.SessionId.Value));
+                _outputSubject.OnNext(output);
+            });
         _transport.Closed += OnTransportClosed;
 
         _ownerTask = Task.Run(RunAsync);
@@ -405,6 +411,15 @@ public sealed class DaemonClient : IAsyncDisposable
                 else
                     await InvokeAsync("ClearSessionModel", [RequireSession()], op.Token);
                 c.Ack.TrySetResult();
+                break;
+            }
+
+            case SessionDeletedNotice c:
+            {
+                // Forget a deleted attached session so reconnect and resume
+                // do not recreate an empty session under the dead id.
+                if (string.Equals(_sessionId, c.SessionId, StringComparison.Ordinal))
+                    _sessionId = null;
                 break;
             }
 
@@ -758,6 +773,10 @@ public sealed class DaemonClient : IAsyncDisposable
         string? ModelId,
         TaskCompletionSource Ack,
         CancellationToken Token) : ClientCommand;
+
+    // Posted by the output pump when the daemon reports a session was
+    // permanently deleted. No caller awaits it.
+    private sealed record SessionDeletedNotice(string SessionId) : ClientCommand;
 
     private sealed record TransportDroppedCommand(Exception? Error) : ClientCommand;
 

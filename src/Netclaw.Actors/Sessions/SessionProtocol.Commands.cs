@@ -152,6 +152,20 @@ public static partial class SessionProtocol
     }
 
     /// <summary>
+    /// Operator command that sets a manual session title. The title persists
+    /// with a locked flag so the automatic title generator does not replace
+    /// it. The session actor replies <see cref="CommandAck"/> only after the
+    /// title event persists; an empty or whitespace-only title replies
+    /// <see cref="CommandNack"/> without a persist.
+    /// </summary>
+    public sealed record RenameSession : ISessionCommand, INoSerializationVerificationNeeded
+    {
+        public required SessionId SessionId { get; init; }
+
+        public required string Title { get; init; }
+    }
+
+    /// <summary>
     /// Text-only approval reply for a pending <see cref="ToolInteractionRequest"/>
     /// when the channel binding does not have the original prompt state locally.
     /// The session resolves the applicable pending interaction from its own

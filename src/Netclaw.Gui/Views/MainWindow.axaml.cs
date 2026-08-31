@@ -52,7 +52,9 @@ public sealed partial class MainWindow : Window
 
     private void OnSessionSelectionChanged(object? sender, SelectionChangedEventArgs e)
     {
-        if (ViewModel is { SelectedSession: { } selected } vm)
+        // Two list boxes (pinned / unpinned) share this handler, so read the
+        // clicked item from the event instead of a shared bound property.
+        if (ViewModel is { } vm && e.AddedItems is [SessionListItemViewModel selected, ..])
             _ = vm.AttachSessionCommand.ExecuteAsync(selected);
     }
 

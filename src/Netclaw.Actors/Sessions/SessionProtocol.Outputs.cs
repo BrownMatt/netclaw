@@ -216,6 +216,14 @@ public static partial class SessionProtocol
     }
 
     /// <summary>
+    /// The session was permanently deleted by an operator. Lifecycle —
+    /// always delivered. Sent by the daemon's teardown (not the session
+    /// actor, which is already stopped) to every attached client so it can
+    /// drop the session from its UI.
+    /// </summary>
+    public sealed record SessionDeletedOutput : SessionOutput;
+
+    /// <summary>
     /// Classifies the source of an <see cref="ErrorOutput"/> for structured
     /// diagnostics and Slack fallback messages.
     /// </summary>

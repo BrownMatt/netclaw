@@ -1855,6 +1855,11 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
     /// </summary>
     private void MaybeGenerateTitle()
     {
+        // A manual rename locks the title — do not spend a sidecar call on
+        // a result the completion handler would drop anyway.
+        if (_state.TitleLocked)
+            return;
+
         if (SessionTitleGenerator.ShouldGenerate(_state.TurnCount, _config.Tuning.TitleGenerationInterval))
             _ = SessionTitleGenerator.GenerateAsync(_compactionClient, _sessionId, _state.History, Self, _log, _config.SidecarLlmTimeout);
     }
@@ -2658,6 +2663,14 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
         // Title generation result — can arrive in any behavior, always safe to apply
         Command<TitleGenerationCompleted>(msg =>
         {
+            // Second lock layer: a generation already in flight when a manual
+            // rename lands must not overwrite the locked title.
+            if (_state.TitleLocked)
+            {
+                _log.Debug("Dropping generated title; the operator locked the title");
+                return;
+            }
+
             var title = msg.Title.Trim();
             if (!string.IsNullOrWhiteSpace(title))
             {
@@ -2780,6 +2793,7 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
         Command<AddPendingAttachment>(HandleAddPendingAttachment);
         Command<SetSessionModel>(HandleSetSessionModel);
         Command<ClearSessionModel>(HandleClearSessionModel);
+        Command<RenameSession>(HandleRenameSession);
         Command<ModelCapabilityProtocol.ModelCapabilitiesResponse>(HandleOverrideCapabilitiesResolved);
     }
 
@@ -5554,14 +5568,20 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
     }
 
 
-    internal void SetTitle(string title)
+    internal void SetTitle(string title) => SetTitle(title, locked: false, ackAfterPersist: false);
+
+    private void SetTitle(string title, bool locked, bool ackAfterPersist)
     {
         var evt = new SessionTitleSet
         {
             SessionId = _sessionId,
             Title = title,
+            Locked = locked,
             SetAtMs = NowMs()
         };
+
+        // Capture before Persist: inside the callback, Sender is unreliable.
+        var replyTo = ackAfterPersist ? Sender : ActorRefs.Nobody;
 
         Persist(evt, e =>
         {
@@ -5570,7 +5590,23 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
             {
                 SessionId = _sessionId
             });
+
+            if (!replyTo.IsNobody() && !Equals(replyTo, Context.System.DeadLetters))
+                replyTo.Tell(CommandAck.For(_sessionId));
         });
+    }
+
+    private void HandleRenameSession(RenameSession cmd)
+    {
+        var title = cmd.Title.Trim();
+        if (string.IsNullOrWhiteSpace(title))
+        {
+            TryReplyNack("A session title cannot be empty.");
+            return;
+        }
+
+        _log.Info("Session renamed by operator: {Title}", title);
+        SetTitle(title, locked: true, ackAfterPersist: true);
     }
 
 }

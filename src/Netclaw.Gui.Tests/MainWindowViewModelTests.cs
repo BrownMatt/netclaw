@@ -154,6 +154,115 @@ public sealed class MainWindowViewModelTests : IDisposable
     }
 
     [Fact]
+    public async Task Deleting_the_attached_session_clears_the_chat_pane()
+    {
+        _service.ConnectGate.SetResult();
+        var vm = CreateViewModel();
+        await WaitForChatAsync(vm);
+
+        _service.Outputs.OnNext(new SessionDeletedOutput
+        {
+            SessionId = new SessionId(_service.SessionIdToReturn)
+        });
+
+        Assert.Null(vm.Chat);
+        Assert.Contains("deleted", vm.Status);
+    }
+
+    [Fact]
+    public async Task Deletion_of_a_detached_session_keeps_the_chat_pane()
+    {
+        _service.ConnectGate.SetResult();
+        var vm = CreateViewModel();
+        await WaitForChatAsync(vm);
+
+        _service.Outputs.OnNext(new SessionDeletedOutput
+        {
+            SessionId = new SessionId("signalr/some-other-session")
+        });
+
+        Assert.NotNull(vm.Chat);
+    }
+
+    [Fact]
+    public async Task Transport_drop_after_a_deleted_session_reconnects_with_a_fresh_session()
+    {
+        _service.ConnectGate.SetResult();
+        var vm = CreateViewModel();
+        await WaitForChatAsync(vm);
+        Assert.Equal(1, _service.EnsureCount);
+
+        _service.Outputs.OnNext(new SessionDeletedOutput
+        {
+            SessionId = new SessionId(_service.SessionIdToReturn)
+        });
+        Assert.Null(vm.Chat);
+
+        // The daemon restarts: the transport drops while no session is
+        // ensured. The client reconnect authority has nothing to re-attach,
+        // so the viewmodel must rearm its own connect loop.
+        _service.Connections.OnNext(new DaemonConnectionEvent(
+            DaemonConnectionState.TransportClosed, "http://127.0.0.1:5199", "dropped"));
+
+        await WaitForChatAsync(vm);
+        Assert.Equal(2, _service.EnsureCount);
+    }
+
+    [Fact]
+    public async Task Transport_drop_with_an_attached_session_defers_to_the_client_reconnect()
+    {
+        _service.ConnectGate.SetResult();
+        var vm = CreateViewModel();
+        await WaitForChatAsync(vm);
+        Assert.Equal(1, _service.ConnectCount);
+
+        _service.Connections.OnNext(new DaemonConnectionEvent(
+            DaemonConnectionState.TransportClosed, "http://127.0.0.1:5199", "dropped"));
+
+        // Drain any accidentally started continuations before asserting the
+        // viewmodel took no action of its own.
+        for (var i = 0; i < 20; i++)
+            await Task.Yield();
+
+        Assert.Equal(1, _service.ConnectCount);
+        Assert.Equal(1, _service.EnsureCount);
+        Assert.Contains("Reconnecting", vm.Status);
+    }
+
+    [Fact]
+    public async Task Attach_after_a_deleted_session_restores_direct_send_and_refreshes_the_list()
+    {
+        _service.ConnectGate.SetResult();
+        _service.ExpectedSends = 1;
+        var vm = CreateViewModel();
+        await WaitForChatAsync(vm);
+
+        _service.Outputs.OnNext(new SessionDeletedOutput
+        {
+            SessionId = new SessionId(_service.SessionIdToReturn)
+        });
+        Assert.Null(vm.Chat);
+        var listCountBefore = _service.ListCount;
+
+        await vm.AttachSessionCommand.ExecuteAsync(new SessionListItemViewModel
+        {
+            SessionId = "signalr/resumed-session",
+            Channel = "tui"
+        });
+
+        Assert.NotNull(vm.Chat);
+        Assert.True(_service.ListCount > listCountBefore);
+
+        // Without the ensured flag restored by the attach, this send would
+        // queue forever instead of dispatching.
+        vm.InputText = "after recovery";
+        await vm.SendCommand.ExecuteAsync(null);
+
+        Assert.Equal(["after recovery"], _service.SentMessages);
+        Assert.Equal(0, vm.QueuedCount);
+    }
+
+    [Fact]
     public async Task Attach_file_uploads_and_shows_a_pending_chip_until_the_next_send()
     {
         _service.ConnectGate.SetResult();
@@ -224,6 +333,12 @@ public sealed class MainWindowViewModelTests : IDisposable
 
         public string SessionIdToReturn { get; set; } = "signalr/fake-session";
 
+        public int ConnectCount { get; private set; }
+
+        public int EnsureCount { get; private set; }
+
+        public int ListCount { get; private set; }
+
         public bool IsConnected { get; private set; }
 
         public Observable<SessionOutput> SessionOutput => Outputs;
@@ -232,12 +347,14 @@ public sealed class MainWindowViewModelTests : IDisposable
 
         public async Task ConnectAsync(CancellationToken cancellationToken = default)
         {
+            ConnectCount++;
             await ConnectGate.Task.WaitAsync(cancellationToken);
             IsConnected = true;
         }
 
         public Task<string> EnsureSessionAsync(CancellationToken cancellationToken = default)
         {
+            EnsureCount++;
             SessionEnsured.TrySetResult();
             return Task.FromResult(SessionIdToReturn);
         }
@@ -270,6 +387,7 @@ public sealed class MainWindowViewModelTests : IDisposable
 
         public Task<List<SessionCatalogEntryDto>> ListSessionsAsync(CancellationToken cancellationToken = default)
         {
+            ListCount++;
             SessionsListed.TrySetResult();
             return Task.FromResult(Sessions);
         }
@@ -285,6 +403,15 @@ public sealed class MainWindowViewModelTests : IDisposable
 
         public Task<ModelCatalogResponseDto?> GetModelCatalogAsync(CancellationToken cancellationToken = default)
             => Task.FromResult<ModelCatalogResponseDto?>(new ModelCatalogResponseDto([]));
+
+        public Task RenameSessionAsync(string sessionId, string title, CancellationToken cancellationToken = default)
+            => Task.CompletedTask;
+
+        public Task SetSessionFlagsAsync(string sessionId, bool? pinned = null, bool? archived = null, CancellationToken cancellationToken = default)
+            => Task.CompletedTask;
+
+        public Task DeleteSessionAsync(string sessionId, CancellationToken cancellationToken = default)
+            => Task.CompletedTask;
 
         public Task SetSessionModelAsync(string provider, string modelId, CancellationToken cancellationToken = default)
             => Task.CompletedTask;

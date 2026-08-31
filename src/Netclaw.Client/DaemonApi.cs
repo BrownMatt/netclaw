@@ -96,28 +96,86 @@ public sealed class DaemonApi
     public async Task<List<SessionCatalogEntryDto>> ListSessionsAsync(
         int? limit = null,
         int? offset = null,
+        bool includeArchived = false,
         CancellationToken ct = default)
     {
         using var cts = CreateTimeoutCts(DefaultTimeout, ct);
         var client = CreateHttpClient();
         var url = $"{_endpoint}/api/sessions";
-        if (limit.HasValue || offset.HasValue)
+        var separator = "?";
+        if (limit.HasValue)
         {
-            var separator = "?";
-            if (limit.HasValue)
-            {
-                url += $"{separator}limit={limit.Value}";
-                separator = "&";
-            }
-
-            if (offset.HasValue)
-                url += $"{separator}offset={offset.Value}";
+            url += $"{separator}limit={limit.Value}";
+            separator = "&";
         }
+
+        if (offset.HasValue)
+        {
+            url += $"{separator}offset={offset.Value}";
+            separator = "&";
+        }
+
+        if (includeArchived)
+            url += $"{separator}includeArchived=true";
 
         using var response = await client.GetAsync(url, cts.Token);
         response.EnsureSuccessStatusCode();
         var stream = await response.Content.ReadAsStreamAsync(cts.Token);
         return await JsonSerializer.DeserializeAsync<List<SessionCatalogEntryDto>>(stream, JsonDefaults.Api, cts.Token) ?? [];
+    }
+
+    /// <summary>
+    /// Sets a manual session title. The daemon locks the title against its
+    /// automatic title generator. Throws <see cref="HttpRequestException"/>
+    /// with the daemon's reason on rejection.
+    /// </summary>
+    public async Task RenameSessionAsync(string sessionId, string title, CancellationToken ct = default)
+    {
+        using var cts = CreateTimeoutCts(LongTimeout, ct);
+        var client = CreateHttpClient();
+        var url = $"{_endpoint}/api/sessions/rename?sessionId={Uri.EscapeDataString(sessionId)}";
+        using var content = JsonContent.Create(new { title }, options: JsonDefaults.Api);
+        using var response = await client.PostAsync(url, content, cts.Token);
+        await ThrowWithReasonOnFailureAsync(response, cts.Token);
+    }
+
+    /// <summary>Sets the pinned and/or archived catalog flags for a session.</summary>
+    public async Task SetSessionFlagsAsync(
+        string sessionId, bool? pinned = null, bool? archived = null, CancellationToken ct = default)
+    {
+        using var cts = CreateTimeoutCts(DefaultTimeout, ct);
+        var client = CreateHttpClient();
+        var url = $"{_endpoint}/api/sessions/flags?sessionId={Uri.EscapeDataString(sessionId)}";
+        using var content = JsonContent.Create(new { pinned, archived }, options: JsonDefaults.Api);
+        using var response = await client.PatchAsync(url, content, cts.Token);
+        await ThrowWithReasonOnFailureAsync(response, cts.Token);
+    }
+
+    /// <summary>
+    /// Permanently deletes a session across every daemon store. Irreversible.
+    /// A partial teardown surfaces as a failure with the step report text.
+    /// </summary>
+    public async Task DeleteSessionAsync(string sessionId, CancellationToken ct = default)
+    {
+        using var cts = CreateTimeoutCts(LongTimeout, ct);
+        var client = CreateHttpClient();
+        var url = $"{_endpoint}/api/sessions?sessionId={Uri.EscapeDataString(sessionId)}";
+        using var response = await client.DeleteAsync(url, cts.Token);
+        await ThrowWithReasonOnFailureAsync(response, cts.Token);
+    }
+
+    private static async Task ThrowWithReasonOnFailureAsync(HttpResponseMessage response, CancellationToken ct)
+    {
+        if (response.IsSuccessStatusCode)
+            return;
+
+        var body = await response.Content.ReadAsStringAsync(ct);
+        throw new HttpRequestException(
+            string.IsNullOrWhiteSpace(body)
+                ? $"Daemon returned {(int)response.StatusCode}."
+                : body.Trim('"'),
+            inner: null,
+            response.StatusCode);
     }
 
     /// <summary>

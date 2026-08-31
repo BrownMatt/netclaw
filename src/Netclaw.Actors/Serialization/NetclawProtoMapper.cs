@@ -189,14 +189,16 @@ internal static class NetclawProtoMapper
     {
         SessionId = ToProto(evt.SessionId),
         Title = evt.Title,
-        SetAtMs = evt.SetAtMs
+        SetAtMs = evt.SetAtMs,
+        Locked = evt.Locked
     };
 
     internal static SessionTitleSet FromProto(Proto.SessionTitleSetProto proto) => new()
     {
         SessionId = FromProto(proto.SessionId),
         Title = proto.Title,
-        SetAtMs = proto.SetAtMs
+        SetAtMs = proto.SetAtMs,
+        Locked = proto.Locked
     };
 
     // ── SessionFolderGrantAdded / SessionFolderGrantRemoved ──
@@ -528,7 +530,8 @@ internal static class NetclawProtoMapper
     {
         var proto = new Proto.SessionSnapshotProto
         {
-            TurnCount = snap.TurnCount
+            TurnCount = snap.TurnCount,
+            TitleLocked = snap.TitleLocked
         };
         if (snap.Title is not null)
             proto.Title = snap.Title;
@@ -547,6 +550,7 @@ internal static class NetclawProtoMapper
     {
         TurnCount = proto.TurnCount,
         Title = proto.HasTitle ? proto.Title : null,
+        TitleLocked = proto.TitleLocked,
         EligibleDeliveryTurnNumber = proto.HasEligibleDeliveryTurnNumber
             ? new TurnNumber(proto.EligibleDeliveryTurnNumber)
             : null,

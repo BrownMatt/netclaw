@@ -100,6 +100,7 @@ message SessionTitleSetProto {
   SessionIdProto session_id = 1;
   string title = 2;
   int64 set_at_ms = 3;
+  bool locked = 4;
 }
 
 message PendingSessionAttachmentProto {
@@ -304,6 +305,7 @@ message SessionSnapshotProto {
   repeated AdoptedContextSnapshotRecord adopted_context_records = 8;
   reserved 9;
   repeated PendingSessionAttachmentProto pending_attachments = 10;
+  bool title_locked = 11;
 }
 
 // ── Session state ──

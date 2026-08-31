@@ -99,6 +99,24 @@ internal sealed class SessionConnectionMap
             return DetachConnectionInternal(connectionId);
     }
 
+    /// <summary>
+    /// Detaches every connection from a session (delete teardown). Returns
+    /// the connections that were attached so the caller can notify them.
+    /// </summary>
+    public IReadOnlyList<SignalRConnectionId> RemoveSession(SessionId sessionId)
+    {
+        lock (_gate)
+        {
+            if (!_sessionToConnections.Remove(sessionId, out var connections))
+                return [];
+
+            foreach (var connection in connections)
+                _connectionToSession.Remove(connection);
+
+            return [.. connections];
+        }
+    }
+
     public void Clear()
     {
         lock (_gate)

@@ -37,6 +37,33 @@ public sealed class DaemonClientMappingTests
     }
 
     [Fact]
+    public void FromDto_maps_session_deleted_output()
+    {
+        var output = DaemonClient.FromDto(new SessionOutputDto
+        {
+            Type = "session_deleted",
+            SessionId = "signalr/gone",
+            TimestampMs = 42
+        });
+
+        var deleted = Assert.IsType<SessionDeletedOutput>(output);
+        Assert.Equal("signalr/gone", deleted.SessionId.Value);
+    }
+
+    [Fact]
+    public void Pinned_and_archived_flags_deserialize_from_the_list_payload()
+    {
+        var json = """[{"persistenceId":"session-signalr/x","channel":"tui","status":"inactive","turnCount":1,"createdAt":1,"lastActivity":2,"pinned":true,"archived":true}]""";
+
+        var entries = System.Text.Json.JsonSerializer.Deserialize<List<SessionCatalogEntryDto>>(
+            json, JsonDefaults.Api)!;
+
+        var entry = Assert.Single(entries);
+        Assert.True(entry.Pinned);
+        Assert.True(entry.Archived);
+    }
+
+    [Fact]
     public void FromDto_maps_text_delta_output()
     {
         var dto = new SessionOutputDto

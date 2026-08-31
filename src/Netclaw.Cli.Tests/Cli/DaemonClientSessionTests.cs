@@ -55,6 +55,39 @@ public sealed class DaemonClientSessionTests
     }
 
     [Fact]
+    public async Task Session_deleted_output_clears_the_attached_session()
+    {
+        using var host = await StartFakeHubAsync();
+        await using var client = InMemorySignalRClientFactory.Create(host);
+        var sessionId = await client.CreateSessionAsync(
+            Netclaw.Actors.Channels.ChannelType.Tui, TestContext.Current.CancellationToken);
+
+        var deletedSeen = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var sub = client.SessionOutput.Subscribe(output =>
+        {
+            if (output is SessionDeletedOutput deleted && deleted.SessionId.Value == sessionId)
+                deletedSeen.TrySetResult();
+        });
+
+        // The daemon's teardown pushes session_deleted directly through the
+        // hub context — simulate that push server-side.
+        var hubContext = host.Services
+            .GetRequiredService<IHubContext<FakeResumeHub, Netclaw.Daemon.Gateway.ISessionHubClient>>();
+        await hubContext.Clients.All.ReceiveOutput(new SessionOutputDto
+        {
+            Type = "session_deleted",
+            SessionId = sessionId,
+            TimestampMs = TimeProvider.System.GetUtcNow().ToUnixTimeMilliseconds()
+        });
+        await deletedSeen.Task.WaitAsync(TestContext.Current.CancellationToken);
+
+        // The client forgot the dead session — a send must fail loudly
+        // instead of resuming (and thereby recreating) the deleted id.
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => client.SendAsync("into the void", TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
     public async Task RespondToInteractionAsync_invokes_hub_method()
     {
         using var host = await StartFakeHubAsync();

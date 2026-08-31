@@ -430,6 +430,57 @@ public sealed class SessionRegistryTests
     /// <see cref="ActorRefs.Nobody"/> for all requests. Used to isolate
     /// <see cref="SessionRegistry"/> from the actor system in unit tests.
     /// </summary>
+    [Fact]
+    public async Task BeginTeardown_detaches_and_notifies_clients_and_blocks_revival()
+    {
+        var registry = BuildRegistry();
+        var sessionId = (await registry.EnsureSessionAsync("conn-1", null, "tui")).SessionId;
+        await registry.EnsureSessionAsync("conn-2", sessionId, "tui");
+
+        var notified = new List<string>();
+        var detached = await registry.BeginTeardownAsync(sessionId, conn =>
+        {
+            notified.Add(conn.Value);
+            return Task.CompletedTask;
+        });
+
+        Assert.Equal(2, detached.Count);
+        Assert.Equal(["conn-1", "conn-2"], notified.Order().ToList());
+
+        // Revival paths fail loudly while the teardown runs.
+        var ensure = await Assert.ThrowsAsync<Microsoft.AspNetCore.SignalR.HubException>(
+            () => registry.EnsureSessionAsync("conn-3", sessionId, "tui"));
+        Assert.Contains("deleted", ensure.Message);
+        await Assert.ThrowsAsync<Microsoft.AspNetCore.SignalR.HubException>(
+            () => registry.AttachSessionAsync("conn-3", sessionId));
+    }
+
+    [Fact]
+    public async Task EndTeardown_lifts_the_revival_block()
+    {
+        var registry = BuildRegistry();
+        var sessionId = (await registry.EnsureSessionAsync("conn-1", null, "tui")).SessionId;
+        await registry.BeginTeardownAsync(sessionId, _ => Task.CompletedTask);
+
+        await registry.EndTeardownAsync(sessionId);
+
+        // The id is free again — a new (empty) session may reuse the string.
+        var result = await registry.EnsureSessionAsync("conn-1", sessionId, "tui");
+        Assert.Equal(sessionId, result.SessionId);
+    }
+
+    [Fact]
+    public async Task BeginTeardown_notification_failure_does_not_abort_the_teardown()
+    {
+        var registry = BuildRegistry();
+        var sessionId = (await registry.EnsureSessionAsync("conn-1", null, "tui")).SessionId;
+
+        var detached = await registry.BeginTeardownAsync(
+            sessionId, _ => throw new InvalidOperationException("client gone"));
+
+        Assert.Single(detached);
+    }
+
     private sealed class StubRequiredActor : IRequiredActor<SignalRGatewayActorKey>
     {
         public IActorRef ActorRef => ActorRefs.Nobody;

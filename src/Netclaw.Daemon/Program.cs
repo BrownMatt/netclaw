@@ -218,6 +218,7 @@ static async Task RunDaemonAsync(
     builder.Services.AddSingleton<ISessionLifecycleObserver>(sp => sp.GetRequiredService<SessionCatalogService>());
     builder.Services.AddSingleton<ClaimsPrincipalMapper>();
     builder.Services.AddSingleton<SessionRegistry>();
+    builder.Services.AddSingleton<SessionTeardownService>();
     builder.Services.AddSingleton<SessionAttachmentService>();
     builder.Services.AddSingleton<DaemonStartClock>();
     builder.Services.AddSingleton<DaemonRuntimeStatusService>();
@@ -314,12 +315,13 @@ static async Task RunDaemonAsync(
         .WithSummary("Get the daemon's runtime status, including connector health.")
         .WithTags("Health")
         .RequireAuthorization();
-    app.MapGet("/api/sessions", (SessionCatalogService catalog, int? limit, int? offset) =>
-        TypedResults.Ok(catalog.ListRecent(limit ?? 50, offset ?? 0)))
+    app.MapGet("/api/sessions", (SessionCatalogService catalog, int? limit, int? offset, bool? includeArchived, bool? pinnedOnly) =>
+        TypedResults.Ok(catalog.ListRecent(limit ?? 50, offset ?? 0, includeArchived ?? false, pinnedOnly ?? false)))
         .WithName("ListSessions")
-        .WithSummary("List the most recent sessions.")
+        .WithSummary("List the most recent sessions. Archived sessions are excluded unless includeArchived is set.")
         .WithTags("Sessions")
         .RequireAuthorization();
+    app.MapSessionManagementEndpoints();
     app.MapPost("/api/sessions/attachments", async Task<IResult> (
             string sessionId,
             IFormFile file,

@@ -58,6 +58,12 @@ public sealed record SessionSnapshot : INetclawSerializableMessage
     public string? Title { get; init; }
 
     /// <summary>
+    /// True when the title came from a manual operator rename. Persisted so
+    /// a recovered session keeps blocking the automatic title generator.
+    /// </summary>
+    public bool TitleLocked { get; init; }
+
+    /// <summary>
     /// Persisted so a recovered session can handle late-arriving
     /// <see cref="DeliveryFailed"/> feedback after passivation.
     /// Null when no turn is eligible (initial state or retries exhausted).
