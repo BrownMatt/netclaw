@@ -81,11 +81,21 @@ public sealed partial class ChatSessionViewModel : ObservableObject
     }
 
     /// <summary>
-    /// Renders the replayed recent history from <see cref="SessionJoined"/>.
+    /// Hydrates the pane from <see cref="SessionJoined"/>: grant chips always,
+    /// replayed messages only when the history is still empty. A re-join for a
+    /// session with live local history (e.g. after a send-failure recovery)
+    /// must not replace it — the local blocks are richer than the truncated
+    /// replay window and can include a message the replay does not carry yet.
     /// </summary>
     public void LoadReplay(SessionJoined joined)
     {
-        Blocks.Clear();
+        GrantedFolders.Clear();
+        foreach (var folder in joined.GrantedFolders)
+            GrantedFolders.Add(folder);
+
+        if (Blocks.Count > 0)
+            return;
+
         foreach (var message in joined.RecentMessages ?? [])
         {
             if (string.IsNullOrWhiteSpace(message.Content))

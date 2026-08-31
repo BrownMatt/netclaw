@@ -192,7 +192,8 @@ public static class SessionOutputDtoMapper
             TimestampMs = msg.TimestampMs,
             Title = msg.Title,
             TurnCount = msg.TurnCount,
-            RecentMessages = msg.RecentMessages?.Select(m => new ChatMessageDto(m.Role, m.Content)).ToList()
+            RecentMessages = msg.RecentMessages?.Select(m => new ChatMessageDto(m.Role, m.Content)).ToList(),
+            GrantedFolders = [.. msg.GrantedFolders]
         },
 
         ToolInteractionRequest msg => new SessionOutputDto
@@ -349,7 +350,8 @@ public static class SessionOutputDtoMapper
                 TimestampMs = dto.TimestampMs,
                 Title = dto.Title,
                 TurnCount = dto.TurnCount ?? 0,
-                RecentMessages = dto.RecentMessages
+                RecentMessages = dto.RecentMessages,
+                GrantedFolders = dto.GrantedFolders ?? []
             },
             SessionOutputTypes.ToolInteraction => new ToolInteractionRequest
             {

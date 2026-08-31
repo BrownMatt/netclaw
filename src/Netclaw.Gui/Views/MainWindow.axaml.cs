@@ -18,6 +18,10 @@ public sealed partial class MainWindow : Window
     // invalidated per token.
     private readonly DispatcherTimer _flushTimer;
 
+    // Auto-scroll follows the newest block only while the operator sits at
+    // the bottom; a manual scroll up pauses following until they return.
+    private bool _pinnedToBottom = true;
+
     public MainWindow()
     {
         InitializeComponent();
@@ -26,6 +30,22 @@ public sealed partial class MainWindow : Window
             DispatcherPriority.Background,
             (_, _) => (DataContext as MainWindowViewModel)?.FlushStreamingDeltas());
         _flushTimer.Start();
+        HistoryScroll.ScrollChanged += OnHistoryScrollChanged;
+    }
+
+    private void OnHistoryScrollChanged(object? sender, ScrollChangedEventArgs e)
+    {
+        if (e.ExtentDelta.Y != 0)
+        {
+            // Content grew or shrank. Follow it only when pinned.
+            if (_pinnedToBottom)
+                HistoryScroll.ScrollToEnd();
+            return;
+        }
+
+        // The offset moved without a content change — the operator scrolled.
+        _pinnedToBottom = HistoryScroll.Offset.Y + HistoryScroll.Viewport.Height
+            >= HistoryScroll.Extent.Height - 8;
     }
 
     private MainWindowViewModel? ViewModel => DataContext as MainWindowViewModel;

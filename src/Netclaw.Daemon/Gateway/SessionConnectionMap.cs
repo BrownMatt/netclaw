@@ -8,51 +8,50 @@ using Netclaw.Actors.Protocol;
 namespace Netclaw.Daemon.Gateway;
 
 /// <summary>
-/// Thread-safe bidirectional mapping between SignalR connection IDs and
-/// session IDs.
+/// The session a connection left when it bound elsewhere or disconnected.
+/// <see cref="SessionNowEmpty"/> tells the caller whether that session lost
+/// its last connection — the signal that gates session shutdown.
+/// </summary>
+internal readonly record struct SessionDetachment(SessionId SessionId, bool SessionNowEmpty);
+
+/// <summary>
+/// Thread-safe mapping between SignalR connection IDs and session IDs.
+/// A connection is attached to at most one session; a session accepts many
+/// concurrent connections (e.g. the GUI plus a CLI client). A session ends
+/// only when its last connection detaches.
 /// </summary>
 internal sealed class SessionConnectionMap
 {
     private readonly object _gate = new();
-    private readonly Dictionary<SessionId, SignalRConnectionId> _sessionToConnection = [];
+    private readonly Dictionary<SessionId, HashSet<SignalRConnectionId>> _sessionToConnections = [];
     private readonly Dictionary<SignalRConnectionId, SessionId> _connectionToSession = [];
 
     /// <summary>
-    /// Binds a newly created session to a connection. If that connection was
-    /// already attached to a previous session, returns the replaced session ID.
+    /// Binds a newly created session to a connection. Returns the detachment
+    /// for the session this connection previously occupied, if any.
     /// </summary>
-    public SessionId? BindNewSession(SessionId sessionId, SignalRConnectionId connectionId)
+    public SessionDetachment? BindNewSession(SessionId sessionId, SignalRConnectionId connectionId)
     {
         lock (_gate)
         {
-            RemoveSessionInternal(sessionId);
-
-            SessionId? replacedSessionId = null;
-            if (_connectionToSession.TryGetValue(connectionId, out var existingSessionId))
-            {
-                replacedSessionId = existingSessionId;
-                RemoveSessionInternal(existingSessionId);
-            }
-
-            _sessionToConnection[sessionId] = connectionId;
-            _connectionToSession[connectionId] = sessionId;
-            return replacedSessionId;
+            var detachment = DetachConnectionInternal(connectionId);
+            AddInternal(sessionId, connectionId);
+            return detachment;
         }
     }
 
     /// <summary>
-    /// Attaches an existing session to a connection, detaching any previous
-    /// connection/session pairings that would conflict.
+    /// Attaches an existing session to a connection. Other connections already
+    /// on that session stay attached. Returns the detachment for the session
+    /// this connection previously occupied, if any.
     /// </summary>
-    public void AttachSession(SessionId sessionId, SignalRConnectionId connectionId)
+    public SessionDetachment? AttachSession(SessionId sessionId, SignalRConnectionId connectionId)
     {
         lock (_gate)
         {
-            RemoveConnectionInternal(connectionId);
-            RemoveSessionInternal(sessionId);
-
-            _sessionToConnection[sessionId] = connectionId;
-            _connectionToSession[connectionId] = sessionId;
+            var detachment = DetachConnectionInternal(connectionId);
+            AddInternal(sessionId, connectionId);
+            return detachment;
         }
     }
 
@@ -65,18 +64,13 @@ internal sealed class SessionConnectionMap
         }
     }
 
-    public bool TryGetConnectionForSession(SessionId sessionId, out SignalRConnectionId connectionId)
+    public int GetConnectionCount(SessionId sessionId)
     {
         lock (_gate)
         {
-            if (_sessionToConnection.TryGetValue(sessionId, out var foundConnection))
-            {
-                connectionId = foundConnection;
-                return true;
-            }
-
-            connectionId = default;
-            return false;
+            return _sessionToConnections.TryGetValue(sessionId, out var connections)
+                ? connections.Count
+                : 0;
         }
     }
 
@@ -95,36 +89,53 @@ internal sealed class SessionConnectionMap
         }
     }
 
-    public void Disconnect(SignalRConnectionId connectionId)
+    /// <summary>
+    /// Removes a disconnected connection. Returns the detachment for the
+    /// session it was attached to, if any.
+    /// </summary>
+    public SessionDetachment? Disconnect(SignalRConnectionId connectionId)
     {
         lock (_gate)
-            RemoveConnectionInternal(connectionId);
+            return DetachConnectionInternal(connectionId);
     }
 
     public void Clear()
     {
         lock (_gate)
         {
-            _sessionToConnection.Clear();
+            _sessionToConnections.Clear();
             _connectionToSession.Clear();
         }
     }
 
-    private void RemoveConnectionInternal(SignalRConnectionId connectionId)
+    private void AddInternal(SessionId sessionId, SignalRConnectionId connectionId)
     {
-        if (_connectionToSession.TryGetValue(connectionId, out var sessionId))
+        if (!_sessionToConnections.TryGetValue(sessionId, out var connections))
         {
-            _connectionToSession.Remove(connectionId);
-            _sessionToConnection.Remove(sessionId);
+            connections = [];
+            _sessionToConnections[sessionId] = connections;
         }
+
+        connections.Add(connectionId);
+        _connectionToSession[connectionId] = sessionId;
     }
 
-    private void RemoveSessionInternal(SessionId sessionId)
+    private SessionDetachment? DetachConnectionInternal(SignalRConnectionId connectionId)
     {
-        if (_sessionToConnection.TryGetValue(sessionId, out var connectionId))
+        if (!_connectionToSession.Remove(connectionId, out var sessionId))
+            return null;
+
+        var nowEmpty = false;
+        if (_sessionToConnections.TryGetValue(sessionId, out var connections))
         {
-            _sessionToConnection.Remove(sessionId);
-            _connectionToSession.Remove(connectionId);
+            connections.Remove(connectionId);
+            if (connections.Count == 0)
+            {
+                _sessionToConnections.Remove(sessionId);
+                nowEmpty = true;
+            }
         }
+
+        return new SessionDetachment(sessionId, nowEmpty);
     }
 }

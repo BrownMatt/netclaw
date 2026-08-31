@@ -30,7 +30,9 @@ internal sealed class SignalRSessionActor : ReceiveActor, IWithUnboundedStash, I
     private readonly ILoggingAdapter _log;
 
     private readonly SessionPipelineHandle _handle;
-    private SignalRConnectionId _currentConnectionId;
+    // Every attached client connection. Output fans out to all of them; the
+    // session ends only when the registry observes the last one leave.
+    private readonly HashSet<SignalRConnectionId> _connections = [];
     private Actors.Channels.ChannelType _channelType = Actors.Channels.ChannelType.Tui;
     private bool _deliveredThisTurn;
     // Reply targets for in-flight reminder delivery confirmations, keyed by
@@ -75,7 +77,7 @@ internal sealed class SignalRSessionActor : ReceiveActor, IWithUnboundedStash, I
         ReceiveAsync<StartSignalRSession>(async msg =>
         {
             _channelType = msg.ChannelType;
-            _currentConnectionId = msg.ConnectionId;
+            _connections.Add(msg.ConnectionId);
 
             try
             {
@@ -114,8 +116,14 @@ internal sealed class SignalRSessionActor : ReceiveActor, IWithUnboundedStash, I
     {
         Receive<AttachSignalRConnection>(msg =>
         {
-            _currentConnectionId = msg.ConnectionId;
+            _connections.Add(msg.ConnectionId);
             _log.Debug("Connection {ConnectionId} attached to session", msg.ConnectionId.Value);
+        });
+
+        Receive<DetachSignalRConnection>(msg =>
+        {
+            _connections.Remove(msg.ConnectionId);
+            _log.Debug("Connection {ConnectionId} detached from session", msg.ConnectionId.Value);
         });
 
         ReceiveAsync<EnqueueSignalRInput>(async msg =>
@@ -264,48 +272,50 @@ internal sealed class SignalRSessionActor : ReceiveActor, IWithUnboundedStash, I
 
     private async Task HandleOutputReceivedAsync(OutputReceived msg)
     {
-        try
+        if (_connections.Count == 0)
         {
-            if (_currentConnectionId == default)
+            // No connected client → nothing was delivered. Report the
+            // outcome (false) so a DeliveryRequired reminder redelivers
+            // rather than waiting out the backstop timeout.
+            if (msg.Output is TurnCompleted noConnTurn)
             {
-                // No connected client → nothing was delivered. Report the
-                // outcome (false) so a DeliveryRequired reminder redelivers
-                // rather than waiting out the backstop timeout.
-                if (msg.Output is TurnCompleted noConnTurn)
-                {
-                    ReportReminderDeliveryResult(noConnTurn, delivered: false);
-                    _deliveredThisTurn = false;
-                }
-                return;
-            }
-
-            var dto = SessionOutputDtoMapper.ToDto(msg.Output);
-            await _hubContext.Clients.Client(_currentConnectionId.Value).ReceiveOutput(dto);
-
-            if (msg.Output is TextOutput or ErrorOutput or FileOutput)
-            {
-                _deliveredThisTurn = true;
-                return;
-            }
-
-            if (msg.Output is TurnCompleted completed)
-            {
-                ReportReminderDeliveryResult(completed, delivered: _deliveredThisTurn);
+                ReportReminderDeliveryResult(noConnTurn, delivered: false);
                 _deliveredThisTurn = false;
+            }
+            return;
+        }
+
+        var dto = SessionOutputDtoMapper.ToDto(msg.Output);
+        var deliveredToAny = false;
+        foreach (var connectionId in _connections)
+        {
+            try
+            {
+                await _hubContext.Clients.Client(connectionId.Value).ReceiveOutput(dto);
+                deliveredToAny = true;
+            }
+            catch (Exception ex)
+            {
+                // One dead connection must not starve the other attached
+                // clients; delivery counts when any client received it.
+                _log.Debug(ex,
+                    "Failed to deliver output to connection {ConnectionId}", connectionId.Value);
             }
         }
-        catch (Exception ex)
-        {
-            _log.Debug(ex,
-                "Failed to deliver output to connection {ConnectionId}", _currentConnectionId.Value);
 
-            // The hub send threw → the reply did not reach the client. Report
-            // failure so the reminder redelivers instead of stalling.
-            if (msg.Output is TurnCompleted failedTurn)
-            {
-                ReportReminderDeliveryResult(failedTurn, delivered: false);
-                _deliveredThisTurn = false;
-            }
+        if (msg.Output is TextOutput or ErrorOutput or FileOutput)
+        {
+            if (deliveredToAny)
+                _deliveredThisTurn = true;
+            return;
+        }
+
+        if (msg.Output is TurnCompleted completed)
+        {
+            // Every hub send threw → the reply did not reach any client.
+            // Report failure so the reminder redelivers instead of stalling.
+            ReportReminderDeliveryResult(completed, delivered: deliveredToAny && _deliveredThisTurn);
+            _deliveredThisTurn = false;
         }
     }
 
@@ -382,8 +392,16 @@ internal sealed record StartSignalRSession(
     Actors.Channels.ChannelType ChannelType,
     SignalRConnectionId ConnectionId) : ISignalRSessionMessage;
 
-/// <summary>Updates the active connection ID for an existing session.</summary>
+/// <summary>Adds a connection to an existing session's delivery set.</summary>
 internal sealed record AttachSignalRConnection(
+    SessionId SessionId,
+    SignalRConnectionId ConnectionId) : ISignalRSessionMessage;
+
+/// <summary>
+/// Removes one connection from a session's delivery set. The session and its
+/// other connections keep running.
+/// </summary>
+internal sealed record DetachSignalRConnection(
     SessionId SessionId,
     SignalRConnectionId ConnectionId) : ISignalRSessionMessage;
 

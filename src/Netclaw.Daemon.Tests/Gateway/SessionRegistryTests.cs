@@ -268,6 +268,46 @@ public sealed class SessionRegistryTests
     }
 
     [Fact]
+    public async Task Disconnect_of_one_client_keeps_the_session_for_the_other()
+    {
+        var capturing = new CapturingRequiredActor();
+        var registry = BuildRegistry(actorProvider: capturing);
+        var sessionId = await registry.CreateSessionAsync("conn-1", "tui");
+        await registry.EnsureSessionAsync("conn-2", sessionId, "tui");
+
+        await registry.OnDisconnectedAsync("conn-2");
+
+        // The session is not shut down; only the departed connection detaches.
+        Assert.Empty(capturing.Messages.OfType<ShutdownSignalRSession>());
+        var detach = Assert.Single(capturing.Messages.OfType<DetachSignalRConnection>());
+        Assert.Equal(sessionId, detach.SessionId.Value);
+        Assert.Equal("conn-2", detach.ConnectionId.Value);
+
+        // The remaining client can still send without a rejection.
+        await registry.SendMessageAsync("conn-1", sessionId, "hello");
+        Assert.Single(capturing.Messages.OfType<EnqueueSignalRInput>());
+    }
+
+    [Fact]
+    public async Task Disconnect_of_last_client_shuts_the_session_down()
+    {
+        var capturing = new CapturingRequiredActor();
+        var registry = BuildRegistry(actorProvider: capturing);
+        var sessionId = await registry.CreateSessionAsync("conn-1", "tui");
+        await registry.EnsureSessionAsync("conn-2", sessionId, "tui");
+
+        await registry.OnDisconnectedAsync("conn-2");
+        await registry.OnDisconnectedAsync("conn-1");
+
+        var shutdown = Assert.Single(capturing.Messages.OfType<ShutdownSignalRSession>());
+        Assert.Equal(sessionId, shutdown.SessionId.Value);
+
+        // The session left the known set — a later send is rejected.
+        await Assert.ThrowsAsync<Microsoft.AspNetCore.SignalR.HubException>(
+            () => registry.SendMessageAsync("conn-1", sessionId, "hello"));
+    }
+
+    [Fact]
     public async Task FolderGrant_throws_when_ingress_closed()
     {
         var gate = new SessionIngressGate();

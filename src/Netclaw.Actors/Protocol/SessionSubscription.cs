@@ -109,4 +109,10 @@ public sealed record SessionJoined : SessionOutput
     /// Null for brand-new sessions. Populated from persisted history.
     /// </summary>
     public IReadOnlyList<ChatMessageDto>? RecentMessages { get; init; }
+
+    /// <summary>
+    /// The session's persisted folder grants at join time, so a client can
+    /// hydrate grant chips without waiting for the next grant change event.
+    /// </summary>
+    public IReadOnlyList<string> GrantedFolders { get; init; } = [];
 }

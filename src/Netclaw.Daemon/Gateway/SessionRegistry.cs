@@ -88,15 +88,8 @@ public sealed class SessionRegistry
         var sessionId = new SessionId($"signalr/{Guid.NewGuid():N}");
 
         _knownSessions[sessionId] = channelType;
-        var previousSessionId = _connections.BindNewSession(sessionId, callerConnectionId);
-
-        // Remove displaced session from known sessions
-        if (previousSessionId.HasValue)
-        {
-            _knownSessions.Remove(previousSessionId.Value);
-            var gateway = await _gatewayProvider.GetAsync();
-            gateway.Tell(new ShutdownSignalRSession(previousSessionId.Value));
-        }
+        var detachment = _connections.BindNewSession(sessionId, callerConnectionId);
+        await HandleDetachmentAsync(detachment, callerConnectionId, shutdownWhenEmpty: true);
 
         var gw = await _gatewayProvider.GetAsync();
         gw.Tell(new StartSignalRSession(sessionId, channelType, callerConnectionId));
@@ -128,8 +121,10 @@ public sealed class SessionRegistry
 
                 if (_knownSessions.ContainsKey(requestedSessionId))
                 {
-                    // Session exists — attach the new connection; actor handles re-init internally
-                    _connections.AttachSession(requestedSessionId, callerConnectionId);
+                    // Session exists — attach the new connection; actor handles re-init internally.
+                    // Other connections already on the session stay attached.
+                    var moved = _connections.AttachSession(requestedSessionId, callerConnectionId);
+                    await HandleDetachmentAsync(moved, callerConnectionId, shutdownWhenEmpty: false);
 
                     var gateway = await _gatewayProvider.GetAsync();
                     gateway.Tell(new AttachSignalRConnection(requestedSessionId, callerConnectionId));
@@ -143,7 +138,8 @@ public sealed class SessionRegistry
 
                 // Session ID provided but unknown — create a fresh session binding
                 _knownSessions[requestedSessionId] = ct;
-                _connections.BindNewSession(requestedSessionId, callerConnectionId);
+                var displaced = _connections.BindNewSession(requestedSessionId, callerConnectionId);
+                await HandleDetachmentAsync(displaced, callerConnectionId, shutdownWhenEmpty: true);
 
                 var gw2 = await _gatewayProvider.GetAsync();
                 gw2.Tell(new StartSignalRSession(requestedSessionId, ct, callerConnectionId));
@@ -177,7 +173,8 @@ public sealed class SessionRegistry
             if (!_knownSessions.TryGetValue(requestedSessionId, out var channelType))
                 throw new HubException($"Session '{sessionId}' not found.");
 
-            _connections.AttachSession(requestedSessionId, callerConnectionId);
+            var moved = _connections.AttachSession(requestedSessionId, callerConnectionId);
+            await HandleDetachmentAsync(moved, callerConnectionId, shutdownWhenEmpty: false);
 
             var gateway = await _gatewayProvider.GetAsync();
             gateway.Tell(new AttachSignalRConnection(requestedSessionId, callerConnectionId));
@@ -328,8 +325,10 @@ public sealed class SessionRegistry
     }
 
     /// <summary>
-    /// Cleans up session state when a SignalR connection disconnects.
-    /// Shuts down the <see cref="SignalRSessionActor"/> so its subscriber is stopped,
+    /// Cleans up session state when a SignalR connection disconnects. When
+    /// other connections are still attached, the session keeps running and
+    /// only this connection detaches. When the last connection leaves, shuts
+    /// down the <see cref="SignalRSessionActor"/> so its subscriber is stopped,
     /// triggering <c>WatchWith</c> → <c>LeaveSession</c> on the LLM session actor.
     /// Removes the session from <c>_knownSessions</c> so that reconnection via
     /// <see cref="EnsureSessionAsync"/> takes the "unknown session" path and sends
@@ -343,35 +342,67 @@ public sealed class SessionRegistry
         await _sessionMutationGate.WaitAsync();
         try
         {
-            if (_connections.TryGetSessionForConnection(parsed, out var sessionId))
-            {
-                _logger.LogDebug(
-                    "Connection {ConnectionId} disconnected; shutting down SignalR session {SessionId}.",
-                    connectionId, sessionId.Value);
-
-                _connections.Disconnect(parsed);
-                _knownSessions.Remove(sessionId);
-
-                try
-                {
-                    var gateway = await _gatewayProvider.GetAsync();
-                    gateway.Tell(new ShutdownSignalRSession(sessionId));
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex,
-                        "Failed to send shutdown to SignalR session {SessionId}.",
-                        sessionId.Value);
-                }
-            }
-            else
-            {
-                _connections.Disconnect(parsed);
-            }
+            var detachment = _connections.Disconnect(parsed);
+            await HandleDetachmentAsync(detachment, parsed, shutdownWhenEmpty: true);
         }
         finally
         {
             _sessionMutationGate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Applies the consequences of a connection leaving a session. When the
+    /// session lost its last connection and <paramref name="shutdownWhenEmpty"/>
+    /// is set, the session binding shuts down; otherwise the session actor is
+    /// told to stop delivery to the departed connection while the other
+    /// attached clients keep receiving output.
+    /// </summary>
+    private async Task HandleDetachmentAsync(
+        SessionDetachment? detachment,
+        SignalRConnectionId connectionId,
+        bool shutdownWhenEmpty)
+    {
+        if (detachment is not { } left)
+            return;
+
+        if (left.SessionNowEmpty && shutdownWhenEmpty)
+        {
+            _logger.LogDebug(
+                "Last connection {ConnectionId} left session {SessionId}; shutting down SignalR session.",
+                connectionId.Value, left.SessionId.Value);
+
+            _knownSessions.Remove(left.SessionId);
+
+            try
+            {
+                var gateway = await _gatewayProvider.GetAsync();
+                gateway.Tell(new ShutdownSignalRSession(left.SessionId));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Failed to send shutdown to SignalR session {SessionId}.",
+                    left.SessionId.Value);
+            }
+
+            return;
+        }
+
+        _logger.LogDebug(
+            "Connection {ConnectionId} detached from session {SessionId}; session keeps its other connections.",
+            connectionId.Value, left.SessionId.Value);
+
+        try
+        {
+            var gateway = await _gatewayProvider.GetAsync();
+            gateway.Tell(new DetachSignalRConnection(left.SessionId, connectionId));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Failed to send detach for connection {ConnectionId} to session {SessionId}.",
+                connectionId.Value, left.SessionId.Value);
         }
     }
 

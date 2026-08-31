@@ -238,6 +238,42 @@ public sealed class ChatSessionViewModelTests
     }
 
     [Fact]
+    public void Replay_hydrates_grant_chips_from_the_join_snapshot()
+    {
+        var vm = CreateViewModel();
+
+        vm.LoadReplay(new SessionJoined
+        {
+            SessionId = Session,
+            GrantedFolders = ["/home/user/projects/alpha", "/home/user/projects/beta"]
+        });
+
+        Assert.Equal(
+            ["/home/user/projects/alpha", "/home/user/projects/beta"],
+            vm.GrantedFolders);
+    }
+
+    [Fact]
+    public void Replay_does_not_replace_live_local_history()
+    {
+        var vm = CreateViewModel();
+        vm.OnMessageSent("message the replay window does not carry yet");
+
+        // A re-join lands after a send-failure recovery. The truncated replay
+        // must not clear the just-sent user block; grants still hydrate.
+        vm.LoadReplay(new SessionJoined
+        {
+            SessionId = Session,
+            RecentMessages = [new ChatMessageDto("user", "old question")],
+            GrantedFolders = ["/home/user/projects/alpha"]
+        });
+
+        var block = Assert.IsType<UserMessageBlockViewModel>(Assert.Single(vm.Blocks));
+        Assert.Equal("message the replay window does not carry yet", block.Text);
+        Assert.Equal(["/home/user/projects/alpha"], vm.GrantedFolders);
+    }
+
+    [Fact]
     public void Folder_grant_events_reconcile_the_chip_list()
     {
         var vm = CreateViewModel();

@@ -129,7 +129,8 @@ public sealed class DaemonClientMappingTests
             [
                 new ChatMessageDto("user", "Hello"),
                 new ChatMessageDto("assistant", "Hi there!")
-            ]
+            ],
+            GrantedFolders = ["/home/user/projects/alpha"]
         };
 
         var output = DaemonClient.FromDto(dto);
@@ -138,6 +139,7 @@ public sealed class DaemonClientMappingTests
         Assert.Equal("signalr/test", joined.SessionId.Value);
         Assert.Equal("Test Chat", joined.Title);
         Assert.Equal(3, joined.TurnCount);
+        Assert.Equal(["/home/user/projects/alpha"], joined.GrantedFolders);
         Assert.NotNull(joined.RecentMessages);
         Assert.Equal(2, joined.RecentMessages.Count);
         Assert.Equal("user", joined.RecentMessages[0].Role);
@@ -166,6 +168,7 @@ public sealed class DaemonClientMappingTests
         Assert.Null(joined.Title);
         Assert.Equal(0, joined.TurnCount);
         Assert.Null(joined.RecentMessages);
+        Assert.Empty(joined.GrantedFolders);
     }
 
     [Fact]

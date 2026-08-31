@@ -2717,7 +2717,8 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
                 SessionId = _sessionId,
                 Title = _state.Title,
                 TurnCount = _state.TurnCount,
-                RecentMessages = SessionRecentMessageExtractor.Extract(_state.History)
+                RecentMessages = SessionRecentMessageExtractor.Extract(_state.History),
+                GrantedFolders = _state.WorkingContext.GrantedFolders
             };
 
             // On re-join, only reply to the Sender (for Ask callers) — don't
