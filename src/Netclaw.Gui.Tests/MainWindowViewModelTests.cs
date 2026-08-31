@@ -418,5 +418,23 @@ public sealed class MainWindowViewModelTests : IDisposable
 
         public Task ClearSessionModelAsync(CancellationToken cancellationToken = default)
             => Task.CompletedTask;
+
+        public Task<LogTailResultDto?> GetDaemonLogTailAsync(int? tail = null, CancellationToken cancellationToken = default)
+            => Task.FromResult<LogTailResultDto?>(null);
+
+        public Task<LogTailResultDto?> GetSessionLogTailAsync(string sessionId, int? tail = null, CancellationToken cancellationToken = default)
+            => Task.FromResult<LogTailResultDto?>(null);
+
+        public Task<RunningModelsResponseDto?> GetRunningModelsAsync(CancellationToken cancellationToken = default)
+            => Task.FromResult<RunningModelsResponseDto?>(null);
+
+        public Task<Netclaw.Configuration.DaemonRuntimeStatus.Response?> GetDaemonStatusAsync(CancellationToken cancellationToken = default)
+            => Task.FromResult<Netclaw.Configuration.DaemonRuntimeStatus.Response?>(null);
+
+        public Task<Netclaw.Configuration.DaemonStats.Response?> GetStatsAsync(CancellationToken cancellationToken = default)
+            => Task.FromResult<Netclaw.Configuration.DaemonStats.Response?>(null);
+
+        public Task<System.Text.Json.JsonElement> GetMcpServerStatusesAsync(CancellationToken cancellationToken = default)
+            => Task.FromResult(default(System.Text.Json.JsonElement));
     }
 }

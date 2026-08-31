@@ -64,6 +64,37 @@ public sealed class DaemonClientMappingTests
     }
 
     [Fact]
+    public void Log_tail_dto_deserializes_the_daemon_wire_shape()
+    {
+        var json = """{"fileName":"daemon-2026-08-31.log","lines":["first","second"]}""";
+
+        var dto = System.Text.Json.JsonSerializer.Deserialize<LogTailResultDto>(
+            json, JsonDefaults.Api)!;
+
+        Assert.Equal("daemon-2026-08-31.log", dto.FileName);
+        Assert.Equal(["first", "second"], dto.Lines);
+    }
+
+    [Fact]
+    public void Running_models_dto_deserializes_the_daemon_wire_shape()
+    {
+        var json = """
+            {"providers":[{"providerKey":"my-ollama","type":"ollama","ok":true,"error":null,
+            "models":[{"id":"qwen3:8b","sizeBytes":6654289920,"expiresAt":"2026-08-31T12:34:56+00:00"}]}]}
+            """;
+
+        var dto = System.Text.Json.JsonSerializer.Deserialize<RunningModelsResponseDto>(
+            json, JsonDefaults.Api)!;
+
+        var provider = Assert.Single(dto.Providers);
+        Assert.True(provider.Ok);
+        var model = Assert.Single(provider.Models);
+        Assert.Equal("qwen3:8b", model.Id);
+        Assert.Equal(6654289920L, model.SizeBytes);
+        Assert.Equal(DateTimeOffset.Parse("2026-08-31T12:34:56Z"), model.ExpiresAt);
+    }
+
+    [Fact]
     public void FromDto_maps_text_delta_output()
     {
         var dto = new SessionOutputDto

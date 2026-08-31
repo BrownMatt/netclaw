@@ -63,6 +63,8 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
 
     public SessionListViewModel SessionList { get; }
 
+    public DiagnosticsPaneViewModel Diagnostics { get; }
+
     public ObservableCollection<PendingAttachmentChip> PendingAttachments { get; } = [];
 
     public MainWindowViewModel(IDaemonSessionService service, IUiDispatcher dispatcher, string endpoint)
@@ -76,6 +78,13 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
             SetArchived: (sessionId, archived) => _service.SetSessionFlagsAsync(sessionId, archived: archived),
             Delete: sessionId => _service.DeleteSessionAsync(sessionId),
             Refresh: RefreshSessionListAsync));
+        Diagnostics = new DiagnosticsPaneViewModel(new DiagnosticsActions(
+            DaemonLogTail: tail => _service.GetDaemonLogTailAsync(tail),
+            SessionLogTail: (sessionId, tail) => _service.GetSessionLogTailAsync(sessionId, tail),
+            RunningModels: () => _service.GetRunningModelsAsync(),
+            DaemonStatus: () => _service.GetDaemonStatusAsync(),
+            Stats: () => _service.GetStatsAsync(),
+            McpStatuses: () => _service.GetMcpServerStatusesAsync()));
 
         _outputSubscription = _service.SessionOutput
             .Subscribe(this, static (output, self) =>
@@ -303,6 +312,9 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
             (callId, key) => _service.RespondToInteractionAsync(callId, key),
             selector);
         PendingAttachments.Clear();
+        Diagnostics.SetAttachedSession(sessionId);
+        // Cleared until the join snapshot reports the authoritative override.
+        Diagnostics.SetModelOverride(null, null);
         _ = LoadModelCatalogAsync(selector);
     }
 
@@ -391,6 +403,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
                 Chat = null;
                 _sessionEnsured = false;
                 Status = "Session deleted.";
+                Diagnostics.SetAttachedSession(null);
             }
 
             _ = RefreshSessionListAsync();
@@ -406,8 +419,12 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         if (output is SessionJoined joined)
         {
             Chat.LoadReplay(joined);
+            Diagnostics.SetModelOverride(joined.ModelOverrideProvider, joined.ModelOverrideId);
             return;
         }
+
+        if (output is ModelOverrideOutput overrideOutput)
+            Diagnostics.SetModelOverride(overrideOutput.Provider, overrideOutput.ModelId);
 
         Chat.HandleOutput(output);
 

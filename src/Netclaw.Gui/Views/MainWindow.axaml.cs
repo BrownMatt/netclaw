@@ -18,6 +18,10 @@ public sealed partial class MainWindow : Window
     // invalidated per token.
     private readonly DispatcherTimer _flushTimer;
 
+    // Diagnostics auto refresh: the tick is a no-op while the pane is
+    // collapsed (guard in the viewmodel), so the timer can run unconditionally.
+    private readonly DispatcherTimer _diagnosticsTimer;
+
     // Auto-scroll follows the newest block only while the operator sits at
     // the bottom; a manual scroll up pauses following until they return.
     private bool _pinnedToBottom = true;
@@ -30,6 +34,11 @@ public sealed partial class MainWindow : Window
             DispatcherPriority.Background,
             (_, _) => (DataContext as MainWindowViewModel)?.FlushStreamingDeltas());
         _flushTimer.Start();
+        _diagnosticsTimer = new DispatcherTimer(
+            TimeSpan.FromSeconds(DiagnosticsPaneViewModel.RefreshIntervalSeconds),
+            DispatcherPriority.Background,
+            (_, _) => (DataContext as MainWindowViewModel)?.Diagnostics.OnRefreshTimerTick());
+        _diagnosticsTimer.Start();
         HistoryScroll.ScrollChanged += OnHistoryScrollChanged;
     }
 
@@ -93,6 +102,7 @@ public sealed partial class MainWindow : Window
     protected override void OnClosed(EventArgs e)
     {
         _flushTimer.Stop();
+        _diagnosticsTimer.Stop();
         (DataContext as MainWindowViewModel)?.Dispose();
         base.OnClosed(e);
     }

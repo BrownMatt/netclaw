@@ -145,6 +145,15 @@ Delete opens a confirmation dialog that names the session and states
 permanence. Deleting the currently attached session clears the chat pane
 when the detach signal arrives.
 
+Reconnect after a delete (found by the E2E smoke): the client reconnect
+authority only re-attaches an existing session. After a delete of the
+attached session, a transport drop left no owner for recovery, and the
+GUI hung on "Reconnecting...". The shell therefore rearms its guarded
+connect loop when the transport drops or disconnects while no session is
+ensured; the loop connects, ensures a fresh session, and refreshes the
+list. A manual attach also sets the ensured flag and refreshes the list,
+so a send after such a recovery dispatches instead of queuing forever.
+
 ## Risks / Trade-offs
 
 - [Revival race: a client ensures the session mid-teardown] → the

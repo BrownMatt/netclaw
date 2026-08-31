@@ -250,6 +250,52 @@ public sealed class DaemonApi
         return await JsonSerializer.DeserializeAsync<ModelCatalogResponseDto>(stream, JsonDefaults.Api, cts.Token);
     }
 
+    /// <summary>
+    /// Lists the models currently loaded by providers that report them.
+    /// </summary>
+    public async Task<RunningModelsResponseDto?> GetRunningModelsAsync(CancellationToken ct = default)
+    {
+        using var cts = CreateTimeoutCts(LongTimeout, ct);
+        var client = CreateHttpClient();
+        using var response = await client.GetAsync($"{_endpoint}/api/models/running", cts.Token);
+        response.EnsureSuccessStatusCode();
+        var stream = await response.Content.ReadAsStreamAsync(cts.Token);
+        return await JsonSerializer.DeserializeAsync<RunningModelsResponseDto>(stream, JsonDefaults.Api, cts.Token);
+    }
+
+    // ── Logs ──────────────────────────────────────────────────────────
+
+    /// <summary>Tails the current daemon log. Null when no log file exists.</summary>
+    public async Task<LogTailResultDto?> GetDaemonLogTailAsync(int? tail = null, CancellationToken ct = default)
+    {
+        var url = $"{_endpoint}/api/logs/daemon";
+        if (tail.HasValue)
+            url += $"?tail={tail.Value}";
+        return await GetLogTailAsync(url, ct);
+    }
+
+    /// <summary>Tails a session's log by id. Null when the session has no log.</summary>
+    public async Task<LogTailResultDto?> GetSessionLogTailAsync(
+        string sessionId, int? tail = null, CancellationToken ct = default)
+    {
+        var url = $"{_endpoint}/api/logs/session?sessionId={Uri.EscapeDataString(sessionId)}";
+        if (tail.HasValue)
+            url += $"&tail={tail.Value}";
+        return await GetLogTailAsync(url, ct);
+    }
+
+    private async Task<LogTailResultDto?> GetLogTailAsync(string url, CancellationToken ct)
+    {
+        using var cts = CreateTimeoutCts(DefaultTimeout, ct);
+        var client = CreateHttpClient();
+        using var response = await client.GetAsync(url, cts.Token);
+        if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+            return null;
+        response.EnsureSuccessStatusCode();
+        var stream = await response.Content.ReadAsStreamAsync(cts.Token);
+        return await JsonSerializer.DeserializeAsync<LogTailResultDto>(stream, JsonDefaults.Api, cts.Token);
+    }
+
     // ── Stats ─────────────────────────────────────────────────────────
 
     public async Task<DaemonStats.Response?> GetStatsAsync(int? days = null, CancellationToken ct = default)

@@ -322,6 +322,7 @@ static async Task RunDaemonAsync(
         .WithTags("Sessions")
         .RequireAuthorization();
     app.MapSessionManagementEndpoints();
+    app.MapLogEndpoints();
     app.MapPost("/api/sessions/attachments", async Task<IResult> (
             string sessionId,
             IFormFile file,

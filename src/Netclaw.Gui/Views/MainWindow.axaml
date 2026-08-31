@@ -34,7 +34,7 @@
     </DataTemplate>
   </Window.Resources>
 
-  <Grid ColumnDefinitions="240,*" Margin="8">
+  <Grid ColumnDefinitions="240,*,Auto" Margin="8">
 
     <!-- Left: managed session list — pinned on top, context-menu actions,
          confirmation-driven updates (the list refreshes after the daemon
@@ -311,6 +311,143 @@
       </ScrollViewer>
 
     </DockPanel>
+
+    <!-- Right: diagnostics pane, collapsed by default. One view at a time;
+         the view's 5 s timer drives refresh, and a collapsed pane sends no
+         requests (the tick guard lives in the viewmodel). -->
+    <StackPanel Grid.Column="2" Orientation="Horizontal" Margin="8,0,0,0">
+      <Button Content="&#x2261;" FontSize="14" Padding="6,10" VerticalAlignment="Top"
+              ToolTip.Tip="Diagnostics"
+              Command="{Binding Diagnostics.ToggleExpandedCommand}" />
+      <Border IsVisible="{Binding Diagnostics.IsExpanded}" Width="360"
+              BorderBrush="#444444" BorderThickness="1" CornerRadius="6"
+              Padding="8" Margin="6,0,0,0">
+        <DockPanel>
+          <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Spacing="4" Margin="0,0,0,6">
+            <Button Content="Logs" FontSize="11" Padding="6,3"
+                    Command="{Binding Diagnostics.SelectViewCommand}"
+                    CommandParameter="{x:Static vm:DiagnosticsView.Logs}" />
+            <Button Content="Models" FontSize="11" Padding="6,3"
+                    Command="{Binding Diagnostics.SelectViewCommand}"
+                    CommandParameter="{x:Static vm:DiagnosticsView.RunningModels}" />
+            <Button Content="Status" FontSize="11" Padding="6,3"
+                    Command="{Binding Diagnostics.SelectViewCommand}"
+                    CommandParameter="{x:Static vm:DiagnosticsView.Status}" />
+            <Button Content="Stats" FontSize="11" Padding="6,3"
+                    Command="{Binding Diagnostics.SelectViewCommand}"
+                    CommandParameter="{x:Static vm:DiagnosticsView.Stats}" />
+            <Button Content="MCP" FontSize="11" Padding="6,3"
+                    Command="{Binding Diagnostics.SelectViewCommand}"
+                    CommandParameter="{x:Static vm:DiagnosticsView.Mcp}" />
+          </StackPanel>
+          <TextBlock DockPanel.Dock="Top" Text="{Binding Diagnostics.RefreshIntervalDisplay}"
+                     FontSize="10" Opacity="0.5" Margin="0,0,0,6" />
+
+          <!-- One view visible at a time; the Panel is the DockPanel's single
+               fill child so every view gets the full remaining height. -->
+          <Panel>
+
+          <!-- Logs -->
+          <DockPanel IsVisible="{Binding Diagnostics.ShowLogs}">
+            <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Spacing="4" Margin="0,0,0,4">
+              <Button Content="Daemon" FontSize="11" Padding="6,2"
+                      Command="{Binding Diagnostics.ShowDaemonLogCommand}" />
+              <Button Content="Session" FontSize="11" Padding="6,2"
+                      IsEnabled="{Binding Diagnostics.SessionLogAvailable}"
+                      Command="{Binding Diagnostics.ShowSessionLogCommand}" />
+              <TextBlock Text="{Binding Diagnostics.LogFileName}" FontSize="10" Opacity="0.6"
+                         VerticalAlignment="Center" />
+            </StackPanel>
+            <TextBlock DockPanel.Dock="Top" Text="{Binding Diagnostics.LogError}"
+                       FontSize="11" Foreground="#CC5555" TextWrapping="Wrap" Margin="0,0,0,4"
+                       IsVisible="{Binding Diagnostics.LogError, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+            <ScrollViewer HorizontalScrollBarVisibility="Auto">
+              <SelectableTextBlock Text="{Binding Diagnostics.LogText}" FontSize="10"
+                                   FontFamily="Cascadia Mono,Consolas,monospace" />
+            </ScrollViewer>
+          </DockPanel>
+
+          <!-- Running models -->
+          <DockPanel IsVisible="{Binding Diagnostics.ShowRunningModels}">
+            <TextBlock DockPanel.Dock="Top" Text="{Binding Diagnostics.RunningModelsError}"
+                       FontSize="11" Foreground="#CC5555" TextWrapping="Wrap" Margin="0,0,0,4"
+                       IsVisible="{Binding Diagnostics.RunningModelsError, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+            <ScrollViewer>
+              <ItemsControl ItemsSource="{Binding Diagnostics.RunningModels}">
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate DataType="vm:RunningModelRow">
+                    <StackPanel Orientation="Horizontal" Spacing="6" Margin="0,3">
+                      <TextBlock Text="&#x25CF;" FontSize="9" VerticalAlignment="Center"
+                                 IsVisible="{Binding IsActive}" />
+                      <StackPanel>
+                        <TextBlock Text="{Binding Id}" FontSize="12" />
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                          <TextBlock Text="{Binding ProviderKey}" FontSize="10" Opacity="0.6" />
+                          <TextBlock Text="{Binding SizeDisplay}" FontSize="10" Opacity="0.6" />
+                          <TextBlock Text="{Binding ExpiresDisplay}" FontSize="10" Opacity="0.6" />
+                        </StackPanel>
+                      </StackPanel>
+                    </StackPanel>
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
+            </ScrollViewer>
+          </DockPanel>
+
+          <!-- Status -->
+          <DockPanel IsVisible="{Binding Diagnostics.ShowStatus}">
+            <TextBlock DockPanel.Dock="Top" Text="{Binding Diagnostics.StatusError}"
+                       FontSize="11" Foreground="#CC5555" TextWrapping="Wrap" Margin="0,0,0,4"
+                       IsVisible="{Binding Diagnostics.StatusError, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+            <ScrollViewer>
+              <SelectableTextBlock Text="{Binding Diagnostics.StatusText}" FontSize="11"
+                                   TextWrapping="Wrap" />
+            </ScrollViewer>
+          </DockPanel>
+
+          <!-- Stats -->
+          <DockPanel IsVisible="{Binding Diagnostics.ShowStats}">
+            <TextBlock DockPanel.Dock="Top" Text="{Binding Diagnostics.StatsError}"
+                       FontSize="11" Foreground="#CC5555" TextWrapping="Wrap" Margin="0,0,0,4"
+                       IsVisible="{Binding Diagnostics.StatsError, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+            <ScrollViewer>
+              <SelectableTextBlock Text="{Binding Diagnostics.StatsText}" FontSize="11"
+                                   TextWrapping="Wrap" />
+            </ScrollViewer>
+          </DockPanel>
+
+          <!-- MCP -->
+          <DockPanel IsVisible="{Binding Diagnostics.ShowMcp}">
+            <TextBlock DockPanel.Dock="Top" Text="{Binding Diagnostics.McpError}"
+                       FontSize="11" Foreground="#CC5555" TextWrapping="Wrap" Margin="0,0,0,4"
+                       IsVisible="{Binding Diagnostics.McpError, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+            <ScrollViewer>
+              <ItemsControl ItemsSource="{Binding Diagnostics.McpServers}">
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate DataType="vm:McpServerRow">
+                    <StackPanel Margin="0,3">
+                      <StackPanel Orientation="Horizontal" Spacing="8">
+                        <TextBlock Text="{Binding Name}" FontSize="12" />
+                        <TextBlock Text="{Binding State}" FontSize="11" Opacity="0.7"
+                                   VerticalAlignment="Center" />
+                        <TextBlock FontSize="10" Opacity="0.6" VerticalAlignment="Center">
+                          <Run Text="{Binding ToolCount}" /><Run Text=" tools" />
+                        </TextBlock>
+                      </StackPanel>
+                      <TextBlock Text="{Binding Error}" FontSize="10" Foreground="#CC5555"
+                                 TextWrapping="Wrap"
+                                 IsVisible="{Binding Error, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+                    </StackPanel>
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
+            </ScrollViewer>
+          </DockPanel>
+
+          </Panel>
+        </DockPanel>
+      </Border>
+    </StackPanel>
   </Grid>
 
 </Window>

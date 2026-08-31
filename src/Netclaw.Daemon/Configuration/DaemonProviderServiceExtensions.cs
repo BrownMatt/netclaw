@@ -72,6 +72,13 @@ public static class DaemonProviderServiceExtensions
             sp.GetRequiredService<TimeProvider>(),
             sp.GetRequiredService<ILogger<ModelCatalogService>>()));
 
+        // Running-models listing for GET /api/models/running (the right-pane
+        // "ollama ps" view). Same degraded-mode posture as the catalog.
+        services.AddSingleton(sp => new RunningModelsService(
+            providers,
+            sp.GetRequiredService<ProviderDescriptorRegistry>(),
+            sp.GetRequiredService<ILogger<RunningModelsService>>()));
+
         if (validation.Status == ProviderRuntimeStatus.NoProviderConfigured)
         {
             services.AddSingleton<IChatClientProvider>(sp =>

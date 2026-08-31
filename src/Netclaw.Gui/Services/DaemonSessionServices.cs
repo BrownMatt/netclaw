@@ -56,6 +56,20 @@ public interface IDaemonSessionService
         Stream content,
         string? contentType,
         CancellationToken cancellationToken = default);
+
+    // ── Diagnostics (right pane) ─────────────────────────────────────
+
+    Task<LogTailResultDto?> GetDaemonLogTailAsync(int? tail = null, CancellationToken cancellationToken = default);
+
+    Task<LogTailResultDto?> GetSessionLogTailAsync(string sessionId, int? tail = null, CancellationToken cancellationToken = default);
+
+    Task<RunningModelsResponseDto?> GetRunningModelsAsync(CancellationToken cancellationToken = default);
+
+    Task<Netclaw.Configuration.DaemonRuntimeStatus.Response?> GetDaemonStatusAsync(CancellationToken cancellationToken = default);
+
+    Task<Netclaw.Configuration.DaemonStats.Response?> GetStatsAsync(CancellationToken cancellationToken = default);
+
+    Task<System.Text.Json.JsonElement> GetMcpServerStatusesAsync(CancellationToken cancellationToken = default);
 }
 
 /// <summary>
@@ -127,4 +141,22 @@ public sealed class DaemonSessionService : IDaemonSessionService
         string? contentType,
         CancellationToken cancellationToken = default)
         => _api.UploadSessionAttachmentAsync(sessionId, fileName, content, contentType, cancellationToken);
+
+    public Task<LogTailResultDto?> GetDaemonLogTailAsync(int? tail = null, CancellationToken cancellationToken = default)
+        => _api.GetDaemonLogTailAsync(tail, cancellationToken);
+
+    public Task<LogTailResultDto?> GetSessionLogTailAsync(string sessionId, int? tail = null, CancellationToken cancellationToken = default)
+        => _api.GetSessionLogTailAsync(sessionId, tail, cancellationToken);
+
+    public Task<RunningModelsResponseDto?> GetRunningModelsAsync(CancellationToken cancellationToken = default)
+        => _api.GetRunningModelsAsync(cancellationToken);
+
+    public Task<Netclaw.Configuration.DaemonRuntimeStatus.Response?> GetDaemonStatusAsync(CancellationToken cancellationToken = default)
+        => _api.GetStatusAsync(cancellationToken);
+
+    public Task<Netclaw.Configuration.DaemonStats.Response?> GetStatsAsync(CancellationToken cancellationToken = default)
+        => _api.GetStatsAsync(days: null, cancellationToken);
+
+    public Task<System.Text.Json.JsonElement> GetMcpServerStatusesAsync(CancellationToken cancellationToken = default)
+        => _api.GetMcpServerStatusesAsync(cancellationToken);
 }
