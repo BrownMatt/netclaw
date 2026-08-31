@@ -79,7 +79,7 @@
 - [x] 7.1 Run the gates: `dotnet build` (0 warnings), full test suite,
   `dotnet slopwatch analyze`, `./scripts/Add-FileHeaders.ps1 -Verify`.
   Verify all pass with no new violations.
-- [ ] 7.2 E2E smoke on the local install: open the dropdown, switch the
+- [x] 7.2 E2E smoke on the local install: open the dropdown, switch the
   session to a second hosted model mid-conversation, confirm the reply
   comes from the override model, clear, restart the daemon, confirm the
   override is gone. Record the result in the vault
