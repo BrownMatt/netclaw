@@ -155,9 +155,10 @@ loudly.
   timeout; failed providers report as failed entries instead of blocking
   the list; short cache keeps repeat opens cheap.
 - [Pipeline cache growth in the override router] → memoization is keyed by
-  `ModelReference` (record equality); the model set an operator can select
-  is bounded by the catalog; entries are plain client pipelines with no
-  connection state worth evicting for MVP.
+  a `(provider, model id)` tuple (`ModelReference` is a mutable class
+  without value equality); the model set an operator can select is bounded
+  by the catalog; entries are plain client pipelines with no connection
+  state worth evicting for MVP.
 - [Capability re-resolve races a fast first turn] → accepted (D6); the
   window is one resolve round-trip and fails loudly at the provider.
 - [`RoutingChatClient` per-role context cache conflicts with per-session
