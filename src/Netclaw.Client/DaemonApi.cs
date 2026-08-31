@@ -174,6 +174,24 @@ public sealed class DaemonApi
                ?? throw new HttpRequestException("Attachment upload returned an empty response.");
     }
 
+    // ── Models ────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Fetches the model catalog: selectable models per configured provider
+    /// with tri-state tool support. Throws <see cref="HttpRequestException"/>
+    /// when the daemon is unreachable; callers show a failure state, never an
+    /// empty list.
+    /// </summary>
+    public async Task<ModelCatalogResponseDto?> GetModelsAsync(CancellationToken ct = default)
+    {
+        using var cts = CreateTimeoutCts(LongTimeout, ct);
+        var client = CreateHttpClient();
+        using var response = await client.GetAsync($"{_endpoint}/api/models", cts.Token);
+        response.EnsureSuccessStatusCode();
+        var stream = await response.Content.ReadAsStreamAsync(cts.Token);
+        return await JsonSerializer.DeserializeAsync<ModelCatalogResponseDto>(stream, JsonDefaults.Api, cts.Token);
+    }
+
     // ── Stats ─────────────────────────────────────────────────────────
 
     public async Task<DaemonStats.Response?> GetStatsAsync(int? days = null, CancellationToken ct = default)

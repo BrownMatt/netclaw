@@ -50,9 +50,20 @@ namespace Netclaw.Actors.Sessions;
 public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
 {
     private readonly SessionId _sessionId;
-    private readonly IChatClient _chatClient;
+    private IChatClient _chatClient;
     private readonly IChatClient _compactionClient;
-    private readonly ModelCapabilities _model;
+
+    // The active model's capabilities. Defaults to the startup-resolved
+    // configured main model; a session model override swaps this (and
+    // _chatClient) and a clear restores _configuredModel. All modality
+    // gating and context-window sizing read _model so they follow the
+    // active model.
+    private ModelCapabilities _model;
+    private readonly ModelCapabilities _configuredModel;
+
+    // Per-session model override (actor state only — never persisted, so a
+    // restart clears it by construction; the roadmap fixes that lifetime).
+    private ModelReference? _modelOverride;
     private readonly SessionConfig _config;
     private readonly ISystemPromptProvider _promptProvider;
     private readonly IReadOnlyList<IContextLayerProvider> _contextLayers;
@@ -240,6 +251,7 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
         // that decision here.
         _compactionClient = services.ClientProvider.GetClient(ModelRole.Compaction);
         _model = modelCapabilities;
+        _configuredModel = modelCapabilities;
         _config = config;
         _promptProvider = services.PromptProvider;
         _contextLayers = services.ContextLayers;
@@ -2718,7 +2730,9 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
                 Title = _state.Title,
                 TurnCount = _state.TurnCount,
                 RecentMessages = SessionRecentMessageExtractor.Extract(_state.History),
-                GrantedFolders = _state.WorkingContext.GrantedFolders
+                GrantedFolders = _state.WorkingContext.GrantedFolders,
+                ModelOverrideProvider = _modelOverride?.Provider,
+                ModelOverrideId = _modelOverride?.ModelId
             };
 
             // On re-join, only reply to the Sender (for Ask callers) — don't
@@ -2764,6 +2778,9 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
         Command<AddFolderGrant>(HandleAddFolderGrant);
         Command<RemoveFolderGrant>(HandleRemoveFolderGrant);
         Command<AddPendingAttachment>(HandleAddPendingAttachment);
+        Command<SetSessionModel>(HandleSetSessionModel);
+        Command<ClearSessionModel>(HandleClearSessionModel);
+        Command<ModelCapabilityProtocol.ModelCapabilitiesResponse>(HandleOverrideCapabilitiesResolved);
     }
 
     private void HandleAddPendingAttachment(AddPendingAttachment cmd)
@@ -2863,6 +2880,121 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
             EmitFolderGrantOutput(e.Path, isGranted: false);
         });
     }
+
+    private void HandleSetSessionModel(SetSessionModel cmd)
+    {
+        if (string.IsNullOrWhiteSpace(cmd.Provider) || string.IsNullOrWhiteSpace(cmd.ModelId))
+        {
+            TryReplyNack("Model override requires a provider key and a model id.");
+            return;
+        }
+
+        var reference = new ModelReference { Provider = cmd.Provider, ModelId = cmd.ModelId };
+        IChatClient client;
+        try
+        {
+            client = _clientProvider.GetClient(new ChatRoutingContext
+            {
+                Role = ModelRole.Main,
+                SessionId = _sessionId.Value,
+                OverrideModel = reference
+            });
+        }
+        catch (Exception ex)
+        {
+            // Pipeline creation failed (e.g. unknown provider key). The
+            // session's routing is unchanged — reject loudly, name the model.
+            TryReplyNack($"Model '{cmd.Provider}/{cmd.ModelId}' did not resolve: {ex.Message}");
+            return;
+        }
+
+        _modelOverride = reference;
+        _chatClient = client;
+        _log.Info("Model override set: {Provider}/{ModelId}", cmd.Provider, cmd.ModelId);
+        TryReplyAck();
+        EmitModelOverrideOutput();
+
+        // Routing applies immediately; gating tightens when the capability
+        // response arrives (accepted window, see the change's design.md D6).
+        ResolveOverrideCapabilities(cmd.ModelId);
+    }
+
+    private void HandleClearSessionModel(ClearSessionModel cmd)
+    {
+        if (_modelOverride is null)
+        {
+            TryReplyNack("No model override is set.");
+            return;
+        }
+
+        _modelOverride = null;
+        _chatClient = _clientProvider.GetClient(ModelRole.Main);
+        _model = _configuredModel;
+        _log.Info("Model override cleared; configured main model restored.");
+        TryReplyAck();
+        EmitModelOverrideOutput();
+    }
+
+    private void ResolveOverrideCapabilities(string modelId)
+    {
+        var log = _log;
+        var registry = ActorRegistry.For(Context.System);
+        if (!registry.TryGet<ModelCapabilityActorKey>(out var capabilityActor))
+        {
+            log.Warning(
+                "Model capability cache unavailable; treating override model {ModelId} as text-only",
+                modelId);
+            Self.Tell(new ModelCapabilityProtocol.ModelCapabilitiesResponse(
+                new ModelId(modelId), ModelModality.Text, ModelModality.Text));
+            return;
+        }
+
+        capabilityActor.Ask<ModelCapabilityProtocol.ModelCapabilitiesResponse>(
+                new ModelCapabilityProtocol.GetModelCapabilities(new ModelId(modelId)),
+                TimeSpan.FromSeconds(15))
+            .PipeTo(Self, failure: ex =>
+            {
+                log.Warning(
+                    "Capability lookup failed for override model {ModelId}: {Error}; using text-only",
+                    modelId, ex.Message);
+                return new ModelCapabilityProtocol.ModelCapabilitiesResponse(
+                    new ModelId(modelId), ModelModality.Text, ModelModality.Text);
+            });
+    }
+
+    private void HandleOverrideCapabilitiesResolved(ModelCapabilityProtocol.ModelCapabilitiesResponse resp)
+    {
+        // Stale guard: the override may have changed or cleared while the
+        // lookup was in flight — apply only a response for the current one.
+        if (_modelOverride is null ||
+            !string.Equals(resp.ModelId.Value, _modelOverride.ModelId, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        _model = new ModelCapabilities
+        {
+            ModelId = _modelOverride.ModelId,
+            InputModalities = resp.InputModalities,
+            OutputModalities = resp.OutputModalities,
+            // Unknown window → the record's conservative default, mirroring
+            // startup resolution semantics for an unresolved model.
+            ContextWindowTokens = resp.ContextWindowTokens
+                ?? new ModelCapabilities().ContextWindowTokens,
+            CompactionModelId = _configuredModel.CompactionModelId
+        };
+        _log.Info(
+            "Override model capabilities active: {ModelId} input={Input} ctx={Ctx}",
+            _model.ModelId, _model.InputModalities, _model.ContextWindowTokens);
+    }
+
+    private void EmitModelOverrideOutput()
+        => EmitOutput(new ModelOverrideOutput
+        {
+            SessionId = _sessionId,
+            Provider = _modelOverride?.Provider,
+            ModelId = _modelOverride?.ModelId
+        });
 
     private void EmitFolderGrantOutput(string path, bool isGranted)
         => EmitOutput(new FolderGrantOutput

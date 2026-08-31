@@ -124,6 +124,79 @@ public sealed class OllamaCapabilityResolverTests
     }
 
     [Fact]
+    public void ParseShowResponse_CapabilitiesWithTools_SupportsToolCalls()
+    {
+        const string json = """
+        {
+          "capabilities": ["completion", "tools", "thinking"],
+          "model_info": {
+            "general.architecture": "qwen35",
+            "qwen35.context_length": 131072
+          }
+        }
+        """;
+
+        var result = OllamaCapabilityResolver.ParseShowResponse(json, "qwen3.5:30b");
+
+        Assert.NotNull(result);
+        Assert.True(result.SupportsToolCalls);
+    }
+
+    [Fact]
+    public void ParseShowResponse_CapabilitiesWithoutTools_NoToolCalls()
+    {
+        const string json = """
+        {
+          "capabilities": ["completion"],
+          "model_info": {
+            "general.architecture": "llava",
+            "llava.context_length": 4096
+          }
+        }
+        """;
+
+        var result = OllamaCapabilityResolver.ParseShowResponse(json, "llava:13b");
+
+        Assert.NotNull(result);
+        Assert.False(result.SupportsToolCalls);
+    }
+
+    [Fact]
+    public void ParseShowResponse_NoCapabilitiesArray_ToolSupportUnknown()
+    {
+        const string json = """
+        {
+          "model_info": {
+            "general.architecture": "qwen35",
+            "qwen35.context_length": 131072
+          }
+        }
+        """;
+
+        var result = OllamaCapabilityResolver.ParseShowResponse(json, "qwen3.5:30b");
+
+        Assert.NotNull(result);
+        Assert.Null(result.SupportsToolCalls);
+    }
+
+    [Fact]
+    public void ParseShowResponse_CapabilitiesWithoutModelInfo_PartialResult()
+    {
+        const string json = """
+        {
+          "capabilities": ["completion", "tools"]
+        }
+        """;
+
+        var result = OllamaCapabilityResolver.ParseShowResponse(json, "qwen3.5:9b");
+
+        Assert.NotNull(result);
+        Assert.True(result.SupportsToolCalls);
+        Assert.Null(result.InputModalities);
+        Assert.Null(result.ContextWindowTokens);
+    }
+
+    [Fact]
     public void ParseShowResponse_MissingArchitecture()
     {
         const string json = """

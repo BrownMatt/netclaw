@@ -23,11 +23,14 @@ public sealed class ChatSessionViewModelTests
     private readonly List<(string CallId, string Key)> _responses = [];
 
     private ChatSessionViewModel CreateViewModel()
-        => new(Session.Value, (callId, key) =>
-        {
-            _responses.Add((callId, key));
-            return Task.CompletedTask;
-        });
+        => new(
+            Session.Value,
+            (callId, key) =>
+            {
+                _responses.Add((callId, key));
+                return Task.CompletedTask;
+            },
+            new ModelSelectorViewModel((_, _) => Task.CompletedTask));
 
     private static TextDeltaOutput Delta(string text) => new(text) { SessionId = Session };
 
@@ -271,6 +274,38 @@ public sealed class ChatSessionViewModelTests
         var block = Assert.IsType<UserMessageBlockViewModel>(Assert.Single(vm.Blocks));
         Assert.Equal("message the replay window does not carry yet", block.Text);
         Assert.Equal(["/home/user/projects/alpha"], vm.GrantedFolders);
+    }
+
+    [Fact]
+    public void Replay_marks_the_active_model_from_the_join_snapshot()
+    {
+        var vm = CreateViewModel();
+
+        vm.LoadReplay(new SessionJoined
+        {
+            SessionId = Session,
+            ModelOverrideProvider = "local-ollama",
+            ModelOverrideId = "qwen3:30b"
+        });
+
+        Assert.Equal("qwen3:30b", vm.ModelSelector.ActiveLabel);
+    }
+
+    [Fact]
+    public void Model_override_events_update_the_selector()
+    {
+        var vm = CreateViewModel();
+
+        vm.HandleOutput(new ModelOverrideOutput
+        {
+            SessionId = Session,
+            Provider = "local-ollama",
+            ModelId = "qwen3:30b"
+        });
+        Assert.Equal("qwen3:30b", vm.ModelSelector.ActiveLabel);
+
+        vm.HandleOutput(new ModelOverrideOutput { SessionId = Session });
+        Assert.Equal(ModelSelectorViewModel.DefaultLabel, vm.ModelSelector.ActiveLabel);
     }
 
     [Fact]

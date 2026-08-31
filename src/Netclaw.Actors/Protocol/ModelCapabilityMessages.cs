@@ -29,12 +29,14 @@ public static class ModelCapabilityProtocol
     // ===== Responses =====
 
     /// <summary>
-    /// Response from the capability cache containing resolved modalities.
+    /// Response from the capability cache containing resolved modalities and,
+    /// when the resolver reported one, the model's context window.
     /// </summary>
     public sealed record ModelCapabilitiesResponse(
         ModelId ModelId,
         ModelModality InputModalities,
-        ModelModality OutputModalities) : IModelCapabilityResponse;
+        ModelModality OutputModalities,
+        int? ContextWindowTokens = null) : IModelCapabilityResponse;
 }
 
 /// <summary>
@@ -44,4 +46,5 @@ internal sealed record CapabilityResolved(
     ModelId ModelId,
     ModelModality InputModalities,
     ModelModality OutputModalities,
-    bool Success) : INoSerializationVerificationNeeded;
+    bool Success,
+    int? ContextWindowTokens = null) : INoSerializationVerificationNeeded;

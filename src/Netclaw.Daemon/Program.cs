@@ -344,6 +344,7 @@ static async Task RunDaemonAsync(
         .WithTags("Sessions")
         .DisableAntiforgery()
         .RequireAuthorization();
+    app.MapModelEndpoints();
     app.MapGet("/api/stats", async ValueTask<Ok<DaemonStats.Response>> (DaemonStatsService statsService, int? days, CancellationToken ct) =>
         TypedResults.Ok(await statsService.GetStatsAsync(days, ct)))
         .WithName("GetStats")

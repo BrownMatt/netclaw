@@ -55,6 +55,44 @@ public sealed class CompositeCapabilityResolverTests
     }
 
     [Fact]
+    public async Task ToolSupport_UnknownFilledByLaterResolver()
+    {
+        var first = new FakeResolver(
+            new ResolvedModelCapabilities("test-model", ModelModality.Text, ModelModality.Text, 200_000));
+        var second = new FakeResolver(
+            new ResolvedModelCapabilities("test-model", null, null, null, SupportsToolCalls: true));
+
+        var composite = new CompositeCapabilityResolver(
+            [first, second],
+            NullLogger<CompositeCapabilityResolver>.Instance);
+
+        var result = await composite.ResolveAsync("test-model", TestContext.Current.CancellationToken);
+
+        Assert.NotNull(result);
+        Assert.True(result.SupportsToolCalls);
+    }
+
+    [Fact]
+    public async Task ToolSupport_ResolvedFalse_IsNotOverwritten()
+    {
+        // false is a resolved value, not an unknown — a later resolver must
+        // not flip it back to true.
+        var first = new FakeResolver(
+            new ResolvedModelCapabilities("test-model", ModelModality.Text, ModelModality.Text, 200_000, SupportsToolCalls: false));
+        var second = new FakeResolver(
+            new ResolvedModelCapabilities("test-model", null, null, null, SupportsToolCalls: true));
+
+        var composite = new CompositeCapabilityResolver(
+            [first, second],
+            NullLogger<CompositeCapabilityResolver>.Instance);
+
+        var result = await composite.ResolveAsync("test-model", TestContext.Current.CancellationToken);
+
+        Assert.NotNull(result);
+        Assert.False(result.SupportsToolCalls);
+    }
+
+    [Fact]
     public async Task NonPositiveContext_DoesNotBlockLaterResolver()
     {
         var first = new FakeResolver(

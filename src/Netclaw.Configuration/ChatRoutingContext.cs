@@ -17,8 +17,16 @@ public sealed record ChatRoutingContext
     public required ModelRole Role { get; init; }
 
     /// <summary>
-    /// Owning session id. Unused today; the explicit seam for a future per-session
-    /// router policy that routes a session's chats to a specific model/provider.
+    /// Owning session id. Populated by session actors so per-session routing
+    /// decisions and diagnostics can correlate to the session.
     /// </summary>
     public string? SessionId { get; init; }
+
+    /// <summary>
+    /// Per-session model override. When set on a Main-role context, the
+    /// router routes to this model as a single candidate — the configured
+    /// fallback chain does not apply, so an override failure is loud.
+    /// Compaction contexts never carry an override.
+    /// </summary>
+    public ModelReference? OverrideModel { get; init; }
 }

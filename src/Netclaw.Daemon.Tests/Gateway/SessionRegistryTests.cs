@@ -13,6 +13,7 @@ using Netclaw.Actors.Hosting;
 using Netclaw.Actors.Protocol;
 using Netclaw.Configuration;
 using Netclaw.Daemon.Gateway;
+using Netclaw.Daemon.Providers;
 using Xunit;
 using static Netclaw.Actors.Sessions.SessionProtocol;
 
@@ -29,14 +30,44 @@ public sealed class SessionRegistryTests
     private SessionRegistry BuildRegistry(
         SessionIngressGate? ingressGate = null,
         IRequiredActor<SignalRGatewayActorKey>? actorProvider = null,
-        ISessionPipeline? pipeline = null)
+        ISessionPipeline? pipeline = null,
+        ModelCatalogService? modelCatalog = null)
         => new(
             actorProvider ?? new StubRequiredActor(),
             pipeline ?? new NoopSessionPipeline(),
             ingressGate ?? new SessionIngressGate(),
             new ClaimsPrincipalMapper(),
+            modelCatalog ?? BuildModelCatalog(),
             TimeProvider.System,
             NullLogger<SessionRegistry>.Instance);
+
+    /// <summary>
+    /// Catalog with one configured provider ("local-ollama") serving one
+    /// model ("qwen3:30b"). Override set-time validation runs against it.
+    /// </summary>
+    private static ModelCatalogService BuildModelCatalog()
+        => new(
+            new Dictionary<string, ProviderEntry> { ["local-ollama"] = new() { Type = "ollama" } },
+            new StaticProbe(),
+            _ => null,
+            new Microsoft.Extensions.Time.Testing.FakeTimeProvider(),
+            NullLogger<ModelCatalogService>.Instance);
+
+    private sealed class StaticProbe : IProviderProbe
+    {
+        public Task<ProviderProbeResult> ProbeAsync(
+            string providerType, string? endpoint, string? apiKey, CancellationToken ct = default)
+            => throw new NotSupportedException();
+
+        public Task<ProviderProbeResult> ProbeAsync(ProviderEntry entry, CancellationToken ct = default)
+            => Task.FromResult(new ProviderProbeResult(
+                true, null, [new DiscoveredModel { ModelId = new ModelId("qwen3:30b") }]));
+
+        public Task<ProviderProbeResult> ProbeAsync(
+            string providerType, string? endpoint, string? credential,
+            AuthMethod authMethod, CancellationToken ct = default)
+            => throw new NotSupportedException();
+    }
 
     [Fact]
     public async Task CreateSession_returns_valid_session_id()
@@ -305,6 +336,79 @@ public sealed class SessionRegistryTests
         // The session left the known set — a later send is rejected.
         await Assert.ThrowsAsync<Microsoft.AspNetCore.SignalR.HubException>(
             () => registry.SendMessageAsync("conn-1", sessionId, "hello"));
+    }
+
+    [Fact]
+    public async Task SetSessionModel_sends_command_for_a_valid_selection()
+    {
+        var pipeline = new RecordingSessionPipeline();
+        var registry = BuildRegistry(pipeline: pipeline);
+        var sessionId = await registry.CreateSessionAsync("conn-1", "tui");
+
+        await registry.SetSessionModelAsync("conn-1", sessionId, "local-ollama", "qwen3:30b");
+
+        var command = Assert.IsType<SetSessionModel>(Assert.Single(pipeline.AwaitedCommands));
+        Assert.Equal(sessionId, command.SessionId.Value);
+        Assert.Equal("local-ollama", command.Provider);
+        Assert.Equal("qwen3:30b", command.ModelId);
+    }
+
+    [Fact]
+    public async Task SetSessionModel_rejects_unknown_provider_without_an_actor_command()
+    {
+        var pipeline = new RecordingSessionPipeline();
+        var registry = BuildRegistry(pipeline: pipeline);
+        var sessionId = await registry.CreateSessionAsync("conn-1", "tui");
+
+        var ex = await Assert.ThrowsAsync<Microsoft.AspNetCore.SignalR.HubException>(
+            () => registry.SetSessionModelAsync("conn-1", sessionId, "ghost-provider", "qwen3:30b"));
+
+        Assert.Contains("ghost-provider", ex.Message);
+        Assert.Empty(pipeline.AwaitedCommands);
+    }
+
+    [Fact]
+    public async Task SetSessionModel_rejects_a_model_absent_from_the_catalog()
+    {
+        var pipeline = new RecordingSessionPipeline();
+        var registry = BuildRegistry(pipeline: pipeline);
+        var sessionId = await registry.CreateSessionAsync("conn-1", "tui");
+
+        var ex = await Assert.ThrowsAsync<Microsoft.AspNetCore.SignalR.HubException>(
+            () => registry.SetSessionModelAsync("conn-1", sessionId, "local-ollama", "ghost-model"));
+
+        Assert.Contains("ghost-model", ex.Message);
+        Assert.Empty(pipeline.AwaitedCommands);
+    }
+
+    [Fact]
+    public async Task ClearSessionModel_sends_command_and_surfaces_the_nack()
+    {
+        var pipeline = new RecordingSessionPipeline
+        {
+            Response = feedback => new CommandNack(feedback.SessionId, "No model override is set.")
+        };
+        var registry = BuildRegistry(pipeline: pipeline);
+        var sessionId = await registry.CreateSessionAsync("conn-1", "tui");
+
+        var ex = await Assert.ThrowsAsync<Microsoft.AspNetCore.SignalR.HubException>(
+            () => registry.ClearSessionModelAsync("conn-1", sessionId));
+
+        Assert.Equal("No model override is set.", ex.Message);
+        Assert.IsType<ClearSessionModel>(Assert.Single(pipeline.AwaitedCommands));
+    }
+
+    [Fact]
+    public async Task SetSessionModel_throws_when_connection_not_attached()
+    {
+        var pipeline = new RecordingSessionPipeline();
+        var registry = BuildRegistry(pipeline: pipeline);
+        await registry.CreateSessionAsync("conn-1", "tui");
+
+        await Assert.ThrowsAsync<Microsoft.AspNetCore.SignalR.HubException>(
+            () => registry.SetSessionModelAsync("conn-2", "signalr/any", "local-ollama", "qwen3:30b"));
+
+        Assert.Empty(pipeline.AwaitedCommands);
     }
 
     [Fact]

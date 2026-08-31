@@ -282,5 +282,14 @@ public sealed class MainWindowViewModelTests : IDisposable
             CancellationToken cancellationToken = default)
             => Task.FromResult(new DaemonApi.SessionAttachmentUploadResultDto(
                 "att-1", fileName, $"inbox/{fileName}", "text/plain", 1));
+
+        public Task<ModelCatalogResponseDto?> GetModelCatalogAsync(CancellationToken cancellationToken = default)
+            => Task.FromResult<ModelCatalogResponseDto?>(new ModelCatalogResponseDto([]));
+
+        public Task SetSessionModelAsync(string provider, string modelId, CancellationToken cancellationToken = default)
+            => Task.CompletedTask;
+
+        public Task ClearSessionModelAsync(CancellationToken cancellationToken = default)
+            => Task.CompletedTask;
     }
 }

@@ -228,6 +228,37 @@ public sealed class DaemonClient : IAsyncDisposable
         await ack.Task.WaitAsync(cancellationToken);
     }
 
+    /// <summary>
+    /// Sets the attached session's main-role model override. The task
+    /// completes after the daemon applied the new routing; a rejected
+    /// selection surfaces as a
+    /// <see cref="Microsoft.AspNetCore.SignalR.HubException"/> with the
+    /// daemon's reason. Attached clients — this one included — receive a
+    /// <c>model_override</c> session output on success. The override is not
+    /// persisted; a daemon restart clears it.
+    /// </summary>
+    public async Task SetSessionModelAsync(
+        string provider, string modelId, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(provider);
+        ArgumentException.ThrowIfNullOrWhiteSpace(modelId);
+
+        var ack = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await PostAsync(new SessionModelCommand(provider, modelId, ack, cancellationToken), cancellationToken);
+        await ack.Task.WaitAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// Clears the session's model override; the configured main model routes
+    /// the next turn when the task completes.
+    /// </summary>
+    public async Task ClearSessionModelAsync(CancellationToken cancellationToken = default)
+    {
+        var ack = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await PostAsync(new SessionModelCommand(null, null, ack, cancellationToken), cancellationToken);
+        await ack.Task.WaitAsync(cancellationToken);
+    }
+
     public async ValueTask DisposeAsync()
     {
         if (_disposed)
@@ -360,6 +391,19 @@ public sealed class DaemonClient : IAsyncDisposable
                     c.Add ? "AddFolderGrant" : "RemoveFolderGrant",
                     [RequireSession(), c.Path],
                     op.Token);
+                c.Ack.TrySetResult();
+                break;
+            }
+
+            case SessionModelCommand c:
+            {
+                using var op = LinkOperation(c.Token);
+                await EnsureConnectedAsync(op.Token);
+                await ReattachIfNeededAsync(op.Token);
+                if (c.Provider is not null && c.ModelId is not null)
+                    await InvokeAsync("SetSessionModel", [RequireSession(), c.Provider, c.ModelId], op.Token);
+                else
+                    await InvokeAsync("ClearSessionModel", [RequireSession()], op.Token);
                 c.Ack.TrySetResult();
                 break;
             }
@@ -658,6 +702,9 @@ public sealed class DaemonClient : IAsyncDisposable
             case FolderGrantCommand c:
                 c.Ack.TrySetException(ex);
                 break;
+            case SessionModelCommand c:
+                c.Ack.TrySetException(ex);
+                break;
             case TransportDroppedCommand:
                 // No caller awaits a transport-drop notification.
                 break;
@@ -702,6 +749,13 @@ public sealed class DaemonClient : IAsyncDisposable
     private sealed record FolderGrantCommand(
         string Path,
         bool Add,
+        TaskCompletionSource Ack,
+        CancellationToken Token) : ClientCommand;
+
+    // Both fields null = clear the override; both set = set it.
+    private sealed record SessionModelCommand(
+        string? Provider,
+        string? ModelId,
         TaskCompletionSource Ack,
         CancellationToken Token) : ClientCommand;
 

@@ -115,4 +115,16 @@ public sealed record SessionJoined : SessionOutput
     /// hydrate grant chips without waiting for the next grant change event.
     /// </summary>
     public IReadOnlyList<string> GrantedFolders { get; init; } = [];
+
+    /// <summary>
+    /// Provider key of the session's active model override at join time;
+    /// null when the session runs the configured main model. The join
+    /// snapshot is authoritative — the override is not persisted, so a
+    /// client must render only what the daemon reports here and in
+    /// <see cref="ModelOverrideOutput"/> events.
+    /// </summary>
+    public string? ModelOverrideProvider { get; init; }
+
+    /// <summary>Model id of the active override at join time; null when none.</summary>
+    public string? ModelOverrideId { get; init; }
 }

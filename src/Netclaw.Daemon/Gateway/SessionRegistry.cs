@@ -36,6 +36,7 @@ public sealed class SessionRegistry
     private readonly ISessionPipeline _pipeline;
     private readonly SessionIngressGate _ingressGate;
     private readonly ClaimsPrincipalMapper _mapper;
+    private readonly Providers.ModelCatalogService _modelCatalog;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<SessionRegistry> _logger;
 
@@ -50,6 +51,7 @@ public sealed class SessionRegistry
         ISessionPipeline pipeline,
         SessionIngressGate ingressGate,
         ClaimsPrincipalMapper mapper,
+        Providers.ModelCatalogService modelCatalog,
         TimeProvider timeProvider,
         ILogger<SessionRegistry> logger)
     {
@@ -57,6 +59,7 @@ public sealed class SessionRegistry
         _pipeline = pipeline;
         _ingressGate = ingressGate;
         _mapper = mapper;
+        _modelCatalog = modelCatalog;
         _timeProvider = timeProvider;
         _logger = logger;
     }
@@ -296,10 +299,60 @@ public sealed class SessionRegistry
             sessionId,
             requestedSessionId => new RemoveFolderGrant { SessionId = requestedSessionId, Path = path });
 
+    /// <summary>
+    /// Sets the attached session's model override. The selection is validated
+    /// against the model catalog before any actor command is sent, so a
+    /// rejected model leaves the session's routing unchanged. The wire request
+    /// carries only a provider key and a model id — endpoints and credentials
+    /// cannot ride it.
+    /// </summary>
+    public async Task SetSessionModelAsync(
+        string connectionId, string sessionId, string providerKey, string modelId,
+        ClaimsPrincipal? principal = null)
+    {
+        var requestedSessionId = ValidateAttachedSession(connectionId, sessionId);
+        ThrowIfIngressClosed();
+
+        var rejection = await _modelCatalog.ValidateSelectionAsync(providerKey, modelId);
+        if (rejection is not null)
+            throw new HubException(rejection);
+
+        await SendSessionCommandAsync(new SetSessionModel
+        {
+            SessionId = requestedSessionId,
+            Provider = providerKey,
+            ModelId = modelId
+        });
+    }
+
+    /// <summary>
+    /// Clears the attached session's model override; main-role routing
+    /// returns to the configured model when the returned task completes.
+    /// </summary>
+    public async Task ClearSessionModelAsync(
+        string connectionId, string sessionId, ClaimsPrincipal? principal = null)
+    {
+        var requestedSessionId = ValidateAttachedSession(connectionId, sessionId);
+        ThrowIfIngressClosed();
+        await SendSessionCommandAsync(new ClearSessionModel { SessionId = requestedSessionId });
+    }
+
     private async Task SendFolderGrantCommandAsync(
         string connectionId,
         string sessionId,
         Func<SessionId, IWithSessionId> createCommand)
+    {
+        var requestedSessionId = ValidateAttachedSession(connectionId, sessionId);
+        ThrowIfIngressClosed();
+        await SendSessionCommandAsync(createCommand(requestedSessionId));
+    }
+
+    /// <summary>
+    /// Confirms the caller's connection is attached to the requested, known
+    /// session and returns the parsed id. Shared precondition for every
+    /// session-scoped operator command.
+    /// </summary>
+    private SessionId ValidateAttachedSession(string connectionId, string sessionId)
     {
         var callerConnectionId = ParseConnectionId(connectionId);
         var requestedSessionId = ParseSessionId(sessionId);
@@ -313,12 +366,13 @@ public sealed class SessionRegistry
         if (!_knownSessions.ContainsKey(attachedSessionId))
             throw new HubException($"Session '{sessionId}' not found.");
 
-        ThrowIfIngressClosed();
+        return requestedSessionId;
+    }
 
+    private async Task SendSessionCommandAsync(IWithSessionId command)
+    {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-        var response = await _pipeline.SendFeedbackAndWaitAsync(
-            createCommand(requestedSessionId),
-            timeout.Token);
+        var response = await _pipeline.SendFeedbackAndWaitAsync(command, timeout.Token);
 
         if (response is CommandNack nack)
             throw new HubException(nack.Reason);

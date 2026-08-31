@@ -6,7 +6,10 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Netclaw.Configuration;
+using Netclaw.Configuration.Http;
+using Netclaw.Daemon.Providers;
 using Netclaw.Providers;
+using Netclaw.Providers.SelfHosted;
 
 namespace Netclaw.Daemon.Configuration;
 
@@ -17,6 +20,28 @@ namespace Netclaw.Daemon.Configuration;
 /// </summary>
 public static class DaemonProviderServiceExtensions
 {
+    private const string ModelCatalogHttpClientName = "ModelCatalogEnrichment";
+
+    /// <summary>
+    /// Per-provider capability enricher for the model catalog. Ollama entries
+    /// get a per-model <c>/api/show</c> resolver bound to that entry's
+    /// endpoint; other provider types have no per-model capability source, so
+    /// their tool support stays unknown.
+    /// </summary>
+    private static IModelCapabilityResolver? CreateCatalogEnricher(
+        IServiceProvider sp, ProviderEntry entry)
+    {
+        if (!string.Equals(entry.Type, "ollama", StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        var endpoint = string.IsNullOrWhiteSpace(entry.Endpoint)
+            ? OllamaDescriptor.DefaultEndpointValue
+            : entry.Endpoint;
+        return new OllamaCapabilityResolver(
+            sp.GetRequiredService<IHttpClientFactory>().CreateClient(ModelCatalogHttpClientName),
+            sp.GetRequiredService<ILogger<OllamaCapabilityResolver>>(),
+            endpoint);
+    }
     /// <summary>
     /// Registers provider plugins (via Netclaw.Providers) plus the daemon-specific
     /// plugin factory, retry policy, pipeline composition, and routing. When
@@ -34,6 +59,18 @@ public static class DaemonProviderServiceExtensions
         // Register descriptors/OAuth endpoints even in degraded mode so operators
         // can recover through provider/model setup flows without restarting first.
         services.AddLlmProviders();
+
+        // Model catalog for GET /api/models and override set-time validation.
+        // Registered before the degraded short-circuits so the endpoint stays
+        // mapped in degraded mode and reports an empty provider list honestly.
+        services.AddHttpClient(ModelCatalogHttpClientName)
+            .AddNetclawHeaders("capability-probe");
+        services.AddSingleton(sp => new ModelCatalogService(
+            providers,
+            sp.GetRequiredService<IProviderProbe>(),
+            entry => CreateCatalogEnricher(sp, entry),
+            sp.GetRequiredService<TimeProvider>(),
+            sp.GetRequiredService<ILogger<ModelCatalogService>>()));
 
         if (validation.Status == ProviderRuntimeStatus.NoProviderConfigured)
         {
@@ -80,10 +117,13 @@ public static class DaemonProviderServiceExtensions
             sp.GetRequiredService<ILoggerFactory>(),
             sp.GetService<TimeProvider>()));
 
-        // Routing policy. Today: role-based selection with primary→fallback failover.
-        // Per-session / per-provider routing slots in here later as a different policy.
-        services.AddSingleton<IChatClientRouter>(sp => new RoleBasedFailoverRouter(
-            sp.GetRequiredService<PipelineChatClientFactory>(), models));
+        // Routing policy: role-based selection with primary→fallback failover,
+        // wrapped by the per-session override policy (Main-role contexts that
+        // carry ChatRoutingContext.OverrideModel route to a single override
+        // pipeline; everything else delegates unchanged).
+        services.AddSingleton<IChatClientRouter>(sp => new OverrideAwareRouter(
+            new RoleBasedFailoverRouter(sp.GetRequiredService<PipelineChatClientFactory>(), models),
+            sp.GetRequiredService<PipelineChatClientFactory>()));
 
         // Router-backed provider the actor layer consumes via GetClient(role).
         services.AddSingleton<IChatClientProvider>(sp => new RoutingChatClientProvider(

@@ -269,10 +269,36 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
 
     private void AdoptSession(string sessionId)
     {
+        var selector = new ModelSelectorViewModel((provider, modelId) =>
+            provider is null || modelId is null
+                ? _service.ClearSessionModelAsync()
+                : _service.SetSessionModelAsync(provider, modelId));
         Chat = new ChatSessionViewModel(
             sessionId,
-            (callId, key) => _service.RespondToInteractionAsync(callId, key));
+            (callId, key) => _service.RespondToInteractionAsync(callId, key),
+            selector);
         PendingAttachments.Clear();
+        _ = LoadModelCatalogAsync(selector);
+    }
+
+    private async Task LoadModelCatalogAsync(ModelSelectorViewModel selector)
+    {
+        _dispatcher.Post(selector.BeginCatalogLoad);
+        try
+        {
+            var catalog = await _service.GetModelCatalogAsync();
+            _dispatcher.Post(() =>
+            {
+                if (catalog is null)
+                    selector.SetCatalogError("The daemon returned an empty model catalog response.");
+                else
+                    selector.LoadCatalog(catalog);
+            });
+        }
+        catch (Exception ex)
+        {
+            _dispatcher.Post(() => selector.SetCatalogError($"Model catalog unavailable: {ex.Message}"));
+        }
     }
 
     private async Task<bool> DispatchAsync(string text)

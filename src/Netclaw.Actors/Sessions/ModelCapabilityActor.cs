@@ -75,7 +75,8 @@ public sealed class ModelCapabilityActor : UntypedActor
                 var input = result?.InputModalities ?? ModelModality.Text;
                 var output = result?.OutputModalities ?? ModelModality.Text;
 
-                self.Tell(new CapabilityResolved(query.ModelId, input, output, true));
+                self.Tell(new CapabilityResolved(
+                    query.ModelId, input, output, true, result?.ContextWindowTokens));
             }
             catch
             {
@@ -87,7 +88,8 @@ public sealed class ModelCapabilityActor : UntypedActor
     private void HandleResolved(CapabilityResolved resolved)
     {
         var response = new ModelCapabilitiesResponse(
-            resolved.ModelId, resolved.InputModalities, resolved.OutputModalities);
+            resolved.ModelId, resolved.InputModalities, resolved.OutputModalities,
+            resolved.ContextWindowTokens);
 
         _cache[resolved.ModelId.Value] = response;
 

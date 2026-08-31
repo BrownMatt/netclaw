@@ -24,6 +24,7 @@ public static class SessionOutputTypes
     public const string TurnCompleted = "turn_completed";
     public const string SessionTitle = "session_title";
     public const string FolderGrant = "folder_grant";
+    public const string ModelOverride = "model_override";
     public const string Error = "error";
     public const string File = "file";
     public const string SubAgent = "subagent";
@@ -141,4 +142,13 @@ public sealed record SessionOutputDto
     public string? GrantPath { get; init; }
     public bool? IsGranted { get; init; }
     public List<string>? GrantedFolders { get; init; }
+
+    /// <summary>
+    /// Provider key of the session's model override — on "model_override"
+    /// events and the "session_joined" snapshot. Null means no override.
+    /// </summary>
+    public string? ModelOverrideProvider { get; init; }
+
+    /// <summary>Model id of the session's model override; null when none.</summary>
+    public string? ModelOverrideId { get; init; }
 }

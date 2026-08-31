@@ -14,7 +14,8 @@ public sealed record ResolvedModelCapabilities(
     string ModelId,
     ModelModality? InputModalities,
     ModelModality? OutputModalities,
-    int? ContextWindowTokens = null);
+    int? ContextWindowTokens = null,
+    bool? SupportsToolCalls = null);
 
 /// <summary>
 /// Resolves model capabilities from a specific source (provider-native API,

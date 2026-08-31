@@ -38,6 +38,12 @@ public interface IDaemonSessionService
 
     Task<List<SessionCatalogEntryDto>> ListSessionsAsync(CancellationToken cancellationToken = default);
 
+    Task<ModelCatalogResponseDto?> GetModelCatalogAsync(CancellationToken cancellationToken = default);
+
+    Task SetSessionModelAsync(string provider, string modelId, CancellationToken cancellationToken = default);
+
+    Task ClearSessionModelAsync(CancellationToken cancellationToken = default);
+
     Task<DaemonApi.SessionAttachmentUploadResultDto> UploadAttachmentAsync(
         string sessionId,
         string fileName,
@@ -89,6 +95,15 @@ public sealed class DaemonSessionService : IDaemonSessionService
 
     public Task<List<SessionCatalogEntryDto>> ListSessionsAsync(CancellationToken cancellationToken = default)
         => _api.ListSessionsAsync(limit: 100, ct: cancellationToken);
+
+    public Task<ModelCatalogResponseDto?> GetModelCatalogAsync(CancellationToken cancellationToken = default)
+        => _api.GetModelsAsync(cancellationToken);
+
+    public Task SetSessionModelAsync(string provider, string modelId, CancellationToken cancellationToken = default)
+        => _client.SetSessionModelAsync(provider, modelId, cancellationToken);
+
+    public Task ClearSessionModelAsync(CancellationToken cancellationToken = default)
+        => _client.ClearSessionModelAsync(cancellationToken);
 
     public Task<DaemonApi.SessionAttachmentUploadResultDto> UploadAttachmentAsync(
         string sessionId,

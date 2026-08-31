@@ -201,6 +201,21 @@ public static partial class SessionProtocol
     }
 
     /// <summary>
+    /// The session's model override changed. Lifecycle — always delivered
+    /// regardless of <see cref="OutputFilter"/>, so attached clients can keep
+    /// the model selector current. Both fields null means the override was
+    /// cleared and the session runs the configured main model.
+    /// </summary>
+    public sealed record ModelOverrideOutput : SessionOutput
+    {
+        /// <summary>Provider key of the active override; null when cleared.</summary>
+        public string? Provider { get; init; }
+
+        /// <summary>Model id of the active override; null when cleared.</summary>
+        public string? ModelId { get; init; }
+    }
+
+    /// <summary>
     /// Classifies the source of an <see cref="ErrorOutput"/> for structured
     /// diagnostics and Slack fallback messages.
     /// </summary>

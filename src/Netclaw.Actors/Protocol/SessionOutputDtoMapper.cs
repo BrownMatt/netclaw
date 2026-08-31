@@ -115,6 +115,15 @@ public static class SessionOutputDtoMapper
             GrantedFolders = [.. msg.GrantedFolders]
         },
 
+        ModelOverrideOutput msg => new SessionOutputDto
+        {
+            Type = SessionOutputTypes.ModelOverride,
+            SessionId = msg.SessionId.Value,
+            TimestampMs = msg.TimestampMs,
+            ModelOverrideProvider = msg.Provider,
+            ModelOverrideId = msg.ModelId
+        },
+
         ErrorOutput msg => new SessionOutputDto
         {
             Type = SessionOutputTypes.Error,
@@ -193,7 +202,9 @@ public static class SessionOutputDtoMapper
             Title = msg.Title,
             TurnCount = msg.TurnCount,
             RecentMessages = msg.RecentMessages?.Select(m => new ChatMessageDto(m.Role, m.Content)).ToList(),
-            GrantedFolders = [.. msg.GrantedFolders]
+            GrantedFolders = [.. msg.GrantedFolders],
+            ModelOverrideProvider = msg.ModelOverrideProvider,
+            ModelOverrideId = msg.ModelOverrideId
         },
 
         ToolInteractionRequest msg => new SessionOutputDto
@@ -304,6 +315,13 @@ public static class SessionOutputDtoMapper
                 IsGranted = dto.IsGranted ?? false,
                 GrantedFolders = dto.GrantedFolders ?? []
             },
+            SessionOutputTypes.ModelOverride => new ModelOverrideOutput
+            {
+                SessionId = sessionId,
+                TimestampMs = dto.TimestampMs,
+                Provider = dto.ModelOverrideProvider,
+                ModelId = dto.ModelOverrideId
+            },
             SessionOutputTypes.Error => new ErrorOutput
             {
                 SessionId = sessionId,
@@ -351,7 +369,9 @@ public static class SessionOutputDtoMapper
                 Title = dto.Title,
                 TurnCount = dto.TurnCount ?? 0,
                 RecentMessages = dto.RecentMessages,
-                GrantedFolders = dto.GrantedFolders ?? []
+                GrantedFolders = dto.GrantedFolders ?? [],
+                ModelOverrideProvider = dto.ModelOverrideProvider,
+                ModelOverrideId = dto.ModelOverrideId
             },
             SessionOutputTypes.ToolInteraction => new ToolInteractionRequest
             {

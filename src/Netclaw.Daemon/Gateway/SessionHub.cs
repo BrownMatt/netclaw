@@ -31,6 +31,8 @@ namespace Netclaw.Daemon.Gateway;
 ///   RespondToInteraction(sessionId: string, callId: string, selectedKey: string) → void
 ///   AddFolderGrant(sessionId: string, path: string) → void (throws HubException on rejection)
 ///   RemoveFolderGrant(sessionId: string, path: string) → void (throws HubException on rejection)
+///   SetSessionModel(sessionId: string, provider: string, modelId: string) → void (throws HubException on rejection)
+///   ClearSessionModel(sessionId: string) → void (throws HubException when no override is set)
 ///   GeneratePairingCode() → PairingCodeResultDto (loopback Operator only)
 ///
 /// Server → Client:
@@ -100,6 +102,28 @@ public sealed class SessionHub : Hub<ISessionHubClient>
     public Task RemoveFolderGrant(string sessionId, string path)
     {
         return _registry.RemoveFolderGrantAsync(Context.ConnectionId, sessionId, path, Context.User);
+    }
+
+    /// <summary>
+    /// Sets the attached session's main-role model override. The selection is
+    /// validated against the model catalog first; a model that does not
+    /// resolve through a configured provider throws <see cref="HubException"/>
+    /// and the session's routing does not change. Attached clients receive a
+    /// <c>model_override</c> output event. The override is not persisted — a
+    /// daemon restart clears it.
+    /// </summary>
+    public Task SetSessionModel(string sessionId, string provider, string modelId)
+    {
+        return _registry.SetSessionModelAsync(Context.ConnectionId, sessionId, provider, modelId, Context.User);
+    }
+
+    /// <summary>
+    /// Clears the session's model override; the configured main model routes
+    /// the next turn once this completes.
+    /// </summary>
+    public Task ClearSessionModel(string sessionId)
+    {
+        return _registry.ClearSessionModelAsync(Context.ConnectionId, sessionId, Context.User);
     }
 
     /// <summary>

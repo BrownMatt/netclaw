@@ -46,6 +46,7 @@ public sealed class CompositeCapabilityResolver : IModelCapabilityResolver
         ModelModality? inputModalities = null;
         ModelModality? outputModalities = null;
         int? contextWindowTokens = null;
+        bool? supportsToolCalls = null;
         var anyResultProduced = false;
 
         foreach (var resolver in _resolvers)
@@ -85,6 +86,7 @@ public sealed class CompositeCapabilityResolver : IModelCapabilityResolver
             anyResultProduced = true;
             inputModalities ??= result.InputModalities;
             outputModalities ??= result.OutputModalities;
+            supportsToolCalls ??= result.SupportsToolCalls;
             // Context windows are positive-only. A 0 from provider metadata is an
             // unknown sentinel, not a resolved value, and must not block a later
             // resolver from supplying the real limit.
@@ -99,7 +101,8 @@ public sealed class CompositeCapabilityResolver : IModelCapabilityResolver
                 result.ContextWindowTokens?.ToString() ?? "null");
 
             // Early-out optimization: every field filled, stop walking.
-            if (inputModalities is not null && outputModalities is not null && contextWindowTokens is not null)
+            if (inputModalities is not null && outputModalities is not null &&
+                contextWindowTokens is not null && supportsToolCalls is not null)
                 break;
         }
 
@@ -107,7 +110,7 @@ public sealed class CompositeCapabilityResolver : IModelCapabilityResolver
             return null;
 
         return new ResolvedModelCapabilities(
-            modelId, inputModalities, outputModalities, contextWindowTokens);
+            modelId, inputModalities, outputModalities, contextWindowTokens, supportsToolCalls);
     }
 
     private static bool IsEligible(IModelCapabilityResolver resolver, string? activeProvider)

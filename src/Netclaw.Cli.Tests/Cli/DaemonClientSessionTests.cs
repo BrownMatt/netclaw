@@ -124,6 +124,48 @@ public sealed class DaemonClientSessionTests
         Assert.Contains("not a directory", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public async Task SetSessionModelAsync_invokes_hub_method()
+    {
+        using var host = await StartFakeHubAsync();
+        var state = host.Services.GetRequiredService<FakeSessionState>();
+
+        await using var client = InMemorySignalRClientFactory.Create(host);
+        await client.CreateSessionAsync(Netclaw.Actors.Channels.ChannelType.Tui, TestContext.Current.CancellationToken);
+
+        await client.SetSessionModelAsync("local-ollama", "qwen3:30b", TestContext.Current.CancellationToken);
+
+        Assert.Equal(("local-ollama", "qwen3:30b"), Assert.Single(state.ModelOverrideCalls));
+    }
+
+    [Fact]
+    public async Task ClearSessionModelAsync_invokes_hub_method()
+    {
+        using var host = await StartFakeHubAsync();
+        var state = host.Services.GetRequiredService<FakeSessionState>();
+
+        await using var client = InMemorySignalRClientFactory.Create(host);
+        await client.CreateSessionAsync(Netclaw.Actors.Channels.ChannelType.Tui, TestContext.Current.CancellationToken);
+
+        await client.ClearSessionModelAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(1, state.ClearModelCalls);
+    }
+
+    [Fact]
+    public async Task SetSessionModelAsync_surfaces_daemon_rejection()
+    {
+        using var host = await StartFakeHubAsync();
+
+        await using var client = InMemorySignalRClientFactory.Create(host);
+        await client.CreateSessionAsync(Netclaw.Actors.Channels.ChannelType.Tui, TestContext.Current.CancellationToken);
+
+        var ex = await Assert.ThrowsAsync<HubException>(
+            () => client.SetSessionModelAsync("local-ollama", "rejected-model", TestContext.Current.CancellationToken));
+
+        Assert.Contains("not available", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
     private static async Task<IHost> StartFakeHubAsync()
     {
         var builder = WebApplication.CreateBuilder();
@@ -146,6 +188,10 @@ public sealed class DaemonClientSessionTests
         public (string CallId, string SelectedKey)? LastInteractionResponse { get; private set; }
 
         public List<(string Path, bool Added)> FolderGrantCalls { get; } = [];
+
+        public List<(string Provider, string ModelId)> ModelOverrideCalls { get; } = [];
+
+        public int ClearModelCalls { get; private set; }
 
         public SessionEnsureResultDto Ensure(string connectionId, string? sessionId)
         {
@@ -181,6 +227,22 @@ public sealed class DaemonClientSessionTests
             lock (_gate)
             {
                 FolderGrantCalls.Add((path, added));
+            }
+        }
+
+        public void RecordModelOverride(string provider, string modelId)
+        {
+            lock (_gate)
+            {
+                ModelOverrideCalls.Add((provider, modelId));
+            }
+        }
+
+        public void RecordClearModel()
+        {
+            lock (_gate)
+            {
+                ClearModelCalls++;
             }
         }
 
@@ -251,6 +313,27 @@ public sealed class DaemonClientSessionTests
                 throw new HubException("Grant path does not exist or is not a directory.");
 
             _state.RecordFolderGrant(path, added);
+            return Task.CompletedTask;
+        }
+
+        public Task SetSessionModel(string sessionId, string provider, string modelId)
+        {
+            if (!_state.IsAttached(Context.ConnectionId, sessionId))
+                throw new HubException("session not attached");
+
+            if (modelId.StartsWith("rejected", StringComparison.Ordinal))
+                throw new HubException($"Model '{modelId}' is not available from provider '{provider}'.");
+
+            _state.RecordModelOverride(provider, modelId);
+            return Task.CompletedTask;
+        }
+
+        public Task ClearSessionModel(string sessionId)
+        {
+            if (!_state.IsAttached(Context.ConnectionId, sessionId))
+                throw new HubException("session not attached");
+
+            _state.RecordClearModel();
             return Task.CompletedTask;
         }
 

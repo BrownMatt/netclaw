@@ -37,13 +37,20 @@ public sealed partial class ChatSessionViewModel : ObservableObject
     private readonly Dictionary<string, ToolCallBlockViewModel> _openToolCalls = [];
     private readonly Dictionary<string, ApprovalCardViewModel> _openApprovals = [];
 
-    public ChatSessionViewModel(string sessionId, Func<string, string, Task> respondToInteraction)
+    public ChatSessionViewModel(
+        string sessionId,
+        Func<string, string, Task> respondToInteraction,
+        ModelSelectorViewModel modelSelector)
     {
         SessionId = sessionId;
         _respondToInteraction = respondToInteraction;
+        ModelSelector = modelSelector;
     }
 
     public string SessionId { get; }
+
+    /// <summary>The model dropdown for this session.</summary>
+    public ModelSelectorViewModel ModelSelector { get; }
 
     public ObservableCollection<ChatBlockViewModel> Blocks { get; } = [];
 
@@ -92,6 +99,10 @@ public sealed partial class ChatSessionViewModel : ObservableObject
         GrantedFolders.Clear();
         foreach (var folder in joined.GrantedFolders)
             GrantedFolders.Add(folder);
+
+        // The join snapshot is authoritative for the override — the daemon
+        // does not persist it, so render only what the daemon reports.
+        ModelSelector.ApplyOverride(joined.ModelOverrideProvider, joined.ModelOverrideId);
 
         if (Blocks.Count > 0)
             return;
@@ -190,6 +201,10 @@ public sealed partial class ChatSessionViewModel : ObservableObject
 
             case UsageOutput usage:
                 UsageText = FormatUsage(usage);
+                break;
+
+            case ModelOverrideOutput modelOverride:
+                ModelSelector.ApplyOverride(modelOverride.Provider, modelOverride.ModelId);
                 break;
 
             case FolderGrantOutput grant:

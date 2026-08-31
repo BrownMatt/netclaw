@@ -29,9 +29,52 @@
     <!-- Middle: chat -->
     <DockPanel Grid.Column="1">
 
-      <TextBlock DockPanel.Dock="Top"
-                 Text="{Binding Status}"
-                 Margin="0,0,0,4" />
+      <!-- Model dropdown: active model, catalog entries with tool-support
+           warnings, loading and failure states. Active marking follows the
+           daemon's confirmation, never an optimistic local flip. -->
+      <Grid DockPanel.Dock="Top" ColumnDefinitions="Auto,*" Margin="0,0,0,4">
+        <DropDownButton Grid.Column="0" FontSize="12" Padding="8,4"
+                        Content="{Binding Chat.ModelSelector.ActiveLabel}">
+          <DropDownButton.Flyout>
+            <Flyout Placement="BottomEdgeAlignedLeft">
+              <StackPanel MinWidth="260" Spacing="2">
+                <TextBlock Text="Loading models..." FontSize="11" Opacity="0.7"
+                           IsVisible="{Binding Chat.ModelSelector.IsLoading}" />
+                <TextBlock Text="{Binding Chat.ModelSelector.CatalogError}"
+                           FontSize="11" Foreground="#CC5555" TextWrapping="Wrap" MaxWidth="320"
+                           IsVisible="{Binding Chat.ModelSelector.CatalogError, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+                <ItemsControl ItemsSource="{Binding Chat.ModelSelector.Options}">
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate DataType="vm:ModelOptionViewModel">
+                      <Button HorizontalAlignment="Stretch" HorizontalContentAlignment="Left"
+                              Padding="8,4" Background="Transparent"
+                              Command="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).Chat.ModelSelector.SelectCommand}"
+                              CommandParameter="{Binding}">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                          <TextBlock Text="&#x25CF;" FontSize="9" VerticalAlignment="Center"
+                                     IsVisible="{Binding IsActive}" />
+                          <TextBlock Text="{Binding Label}" FontSize="12" VerticalAlignment="Center" />
+                          <Border Background="#33CC8833" CornerRadius="8" Padding="6,1"
+                                  VerticalAlignment="Center" IsVisible="{Binding HasWarning}">
+                            <TextBlock Text="{Binding Warning}" FontSize="10" />
+                          </Border>
+                        </StackPanel>
+                      </Button>
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
+                <TextBlock Text="{Binding Chat.ModelSelector.SelectionError}"
+                           FontSize="11" Foreground="#CC5555" TextWrapping="Wrap" MaxWidth="320"
+                           IsVisible="{Binding Chat.ModelSelector.SelectionError, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+              </StackPanel>
+            </Flyout>
+          </DropDownButton.Flyout>
+        </DropDownButton>
+        <TextBlock Grid.Column="1"
+                   Text="{Binding Status}"
+                   VerticalAlignment="Center"
+                   Margin="8,0,0,0" />
+      </Grid>
 
       <!-- Composer -->
       <StackPanel DockPanel.Dock="Bottom" Margin="0,6,0,0" Spacing="4">

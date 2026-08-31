@@ -23,6 +23,14 @@ public interface IChatClientProvider
     IChatClient GetClient(ModelRole role);
 
     /// <summary>
+    /// Returns the <see cref="IChatClient"/> for a full routing context —
+    /// the seam session actors use to apply a per-session model override.
+    /// The default delegates to role-only resolution; router-backed
+    /// implementations honor <see cref="ChatRoutingContext.OverrideModel"/>.
+    /// </summary>
+    IChatClient GetClient(ChatRoutingContext context) => GetClient(context.Role);
+
+    /// <summary>
     /// True when the provider is serving a No-Op fallback because no valid
     /// inference provider configuration was detected. Diagnostic surfaces
     /// (notably <c>netclaw doctor</c>) check this so they can report the

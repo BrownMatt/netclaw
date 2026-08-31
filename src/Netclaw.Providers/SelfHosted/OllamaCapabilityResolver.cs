@@ -71,8 +71,31 @@ public sealed class OllamaCapabilityResolver : IModelCapabilityResolver
     {
         using var doc = JsonDocument.Parse(json);
 
+        // Tri-state tool support from the top-level "capabilities" array:
+        // "tools" present → true; array without "tools" → false; no array →
+        // null (old Ollama versions omit it — unknown, never "unsupported").
+        bool? supportsToolCalls = null;
+        if (doc.RootElement.TryGetProperty("capabilities", out var caps) &&
+            caps.ValueKind == JsonValueKind.Array)
+        {
+            supportsToolCalls = false;
+            foreach (var capability in caps.EnumerateArray())
+            {
+                if (capability.ValueKind == JsonValueKind.String &&
+                    string.Equals(capability.GetString(), "tools", StringComparison.OrdinalIgnoreCase))
+                {
+                    supportsToolCalls = true;
+                    break;
+                }
+            }
+        }
+
         if (!doc.RootElement.TryGetProperty("model_info", out var modelInfo))
-            return null;
+        {
+            return supportsToolCalls is null
+                ? null
+                : new ResolvedModelCapabilities(modelId, null, null, null, supportsToolCalls);
+        }
 
         // Read the architecture prefix (e.g. "qwen35", "llava")
         string? arch = null;
@@ -97,6 +120,7 @@ public sealed class OllamaCapabilityResolver : IModelCapabilityResolver
         }
 
         // Ollama only serves text generators — output is always text
-        return new ResolvedModelCapabilities(modelId, inputModalities, ModelModality.Text, contextWindow);
+        return new ResolvedModelCapabilities(
+            modelId, inputModalities, ModelModality.Text, contextWindow, supportsToolCalls);
     }
 }

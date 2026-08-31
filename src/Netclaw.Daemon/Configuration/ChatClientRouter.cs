@@ -70,3 +70,44 @@ public sealed class RoleBasedFailoverRouter : IChatClientRouter
         _ => _mainCandidates
     };
 }
+
+/// <summary>
+/// Router policy that honors <see cref="ChatRoutingContext.OverrideModel"/>
+/// on Main-role contexts: a single lazily-built pipeline per overridden
+/// model, memoized by (provider, model id). The configured fallback chain
+/// deliberately does not apply to an override — a failed override call must
+/// be loud, not silently served by a different model. Every other context
+/// delegates to the wrapped role-based policy unchanged.
+/// </summary>
+public sealed class OverrideAwareRouter : IChatClientRouter
+{
+    private readonly IChatClientRouter _inner;
+    private readonly Func<ModelReference, IChatClient> _create;
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<(string Provider, string ModelId), IChatClient> _overridePipelines = new();
+
+    public OverrideAwareRouter(IChatClientRouter inner, PipelineChatClientFactory factory)
+        : this(inner, factory.Create)
+    {
+    }
+
+    // Test seam: build override pipelines from any create function.
+    internal OverrideAwareRouter(IChatClientRouter inner, Func<ModelReference, IChatClient> create)
+    {
+        _inner = inner;
+        _create = create;
+    }
+
+    public IReadOnlyList<IChatClient> Route(ChatRoutingContext context)
+    {
+        // Only Main honors the override; Compaction (and any future role)
+        // keeps its configured routing even if a caller sets the field.
+        if (context.OverrideModel is not { } overrideModel || context.Role == ModelRole.Compaction)
+            return _inner.Route(context);
+
+        var pipeline = _overridePipelines.GetOrAdd(
+            (overrideModel.Provider, overrideModel.ModelId),
+            static (_, state) => state.Create(state.Model),
+            (Create: _create, Model: overrideModel));
+        return [pipeline];
+    }
+}

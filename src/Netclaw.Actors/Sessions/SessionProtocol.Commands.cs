@@ -123,6 +123,35 @@ public static partial class SessionProtocol
     }
 
     /// <summary>
+    /// Operator command that sets the session's main-role model override.
+    /// The override is actor state only — it is not persisted, and a daemon
+    /// restart clears it. The session actor replies <see cref="CommandAck"/>
+    /// after the new routing is applied. The wire request carries only a
+    /// model selector (provider key + model id); provider endpoints and
+    /// credentials cannot ride this command.
+    /// </summary>
+    public sealed record SetSessionModel : ISessionCommand, INoSerializationVerificationNeeded
+    {
+        public required SessionId SessionId { get; init; }
+
+        /// <summary>Provider key into the configured Providers dictionary.</summary>
+        public required string Provider { get; init; }
+
+        /// <summary>Model id as served by that provider.</summary>
+        public required string ModelId { get; init; }
+    }
+
+    /// <summary>
+    /// Operator command that clears the session's model override and returns
+    /// main-role routing to the configured model. Replies
+    /// <see cref="CommandNack"/> when no override is set.
+    /// </summary>
+    public sealed record ClearSessionModel : ISessionCommand, INoSerializationVerificationNeeded
+    {
+        public required SessionId SessionId { get; init; }
+    }
+
+    /// <summary>
     /// Text-only approval reply for a pending <see cref="ToolInteractionRequest"/>
     /// when the channel binding does not have the original prompt state locally.
     /// The session resolves the applicable pending interaction from its own

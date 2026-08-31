@@ -130,7 +130,9 @@ public sealed class DaemonClientMappingTests
                 new ChatMessageDto("user", "Hello"),
                 new ChatMessageDto("assistant", "Hi there!")
             ],
-            GrantedFolders = ["/home/user/projects/alpha"]
+            GrantedFolders = ["/home/user/projects/alpha"],
+            ModelOverrideProvider = "local-ollama",
+            ModelOverrideId = "qwen3:30b"
         };
 
         var output = DaemonClient.FromDto(dto);
@@ -140,6 +142,8 @@ public sealed class DaemonClientMappingTests
         Assert.Equal("Test Chat", joined.Title);
         Assert.Equal(3, joined.TurnCount);
         Assert.Equal(["/home/user/projects/alpha"], joined.GrantedFolders);
+        Assert.Equal("local-ollama", joined.ModelOverrideProvider);
+        Assert.Equal("qwen3:30b", joined.ModelOverrideId);
         Assert.NotNull(joined.RecentMessages);
         Assert.Equal(2, joined.RecentMessages.Count);
         Assert.Equal("user", joined.RecentMessages[0].Role);
@@ -169,6 +173,34 @@ public sealed class DaemonClientMappingTests
         Assert.Equal(0, joined.TurnCount);
         Assert.Null(joined.RecentMessages);
         Assert.Empty(joined.GrantedFolders);
+        Assert.Null(joined.ModelOverrideProvider);
+        Assert.Null(joined.ModelOverrideId);
+    }
+
+    [Fact]
+    public void FromDto_maps_model_override_set_and_clear()
+    {
+        var set = DaemonClient.FromDto(new SessionOutputDto
+        {
+            Type = "model_override",
+            SessionId = "signalr/test",
+            TimestampMs = 100,
+            ModelOverrideProvider = "local-ollama",
+            ModelOverrideId = "qwen3:30b"
+        });
+        var setOutput = Assert.IsType<ModelOverrideOutput>(set);
+        Assert.Equal("local-ollama", setOutput.Provider);
+        Assert.Equal("qwen3:30b", setOutput.ModelId);
+
+        var clear = DaemonClient.FromDto(new SessionOutputDto
+        {
+            Type = "model_override",
+            SessionId = "signalr/test",
+            TimestampMs = 200
+        });
+        var clearOutput = Assert.IsType<ModelOverrideOutput>(clear);
+        Assert.Null(clearOutput.Provider);
+        Assert.Null(clearOutput.ModelId);
     }
 
     [Fact]

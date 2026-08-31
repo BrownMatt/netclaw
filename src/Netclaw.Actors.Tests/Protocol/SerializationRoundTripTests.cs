@@ -209,6 +209,58 @@ public sealed class SerializationRoundTripTests : TestKit
     }
 
     [Fact]
+    public void Model_override_output_round_trips_through_the_transport_DTO()
+    {
+        var original = new ModelOverrideOutput
+        {
+            SessionId = new SessionId("test/wire"),
+            Provider = "local-ollama",
+            ModelId = "qwen3:30b"
+        };
+
+        var dto = SessionOutputDtoMapper.ToDto(original);
+        Assert.Equal(SessionOutputTypes.ModelOverride, dto.Type);
+
+        var result = Assert.IsType<ModelOverrideOutput>(SessionOutputDtoMapper.FromDto(dto));
+
+        Assert.Equal("local-ollama", result.Provider);
+        Assert.Equal("qwen3:30b", result.ModelId);
+    }
+
+    [Fact]
+    public void Model_override_clear_round_trips_with_null_fields()
+    {
+        var original = new ModelOverrideOutput
+        {
+            SessionId = new SessionId("test/wire")
+        };
+
+        var result = Assert.IsType<ModelOverrideOutput>(
+            SessionOutputDtoMapper.FromDto(SessionOutputDtoMapper.ToDto(original)));
+
+        Assert.Null(result.Provider);
+        Assert.Null(result.ModelId);
+    }
+
+    [Fact]
+    public void Session_joined_round_trips_the_model_override_snapshot()
+    {
+        var original = new SessionJoined
+        {
+            SessionId = new SessionId("test/wire"),
+            TurnCount = 3,
+            ModelOverrideProvider = "local-ollama",
+            ModelOverrideId = "qwen3:30b"
+        };
+
+        var result = Assert.IsType<SessionJoined>(
+            SessionOutputDtoMapper.FromDto(SessionOutputDtoMapper.ToDto(original)));
+
+        Assert.Equal("local-ollama", result.ModelOverrideProvider);
+        Assert.Equal("qwen3:30b", result.ModelOverrideId);
+    }
+
+    [Fact]
     public void TurnRecorded_round_trips_with_null_source_ids()
     {
         var original = new TurnRecorded

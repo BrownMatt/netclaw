@@ -228,4 +228,24 @@ public sealed class RoutingChatClientProvider : IChatClientProvider
             _loggerFactory.CreateLogger<RoutingChatClient>(),
             _timeProvider));
     }
+
+    /// <summary>
+    /// Context-bound resolution for per-session routing. A context without an
+    /// override reuses the shared role-keyed client; with one, the returned
+    /// client is a cheap wrapper bound to that context — the expensive
+    /// pipelines behind it are cached inside the router, so callers re-resolve
+    /// freely on override changes.
+    /// </summary>
+    public IChatClient GetClient(ChatRoutingContext context)
+    {
+        if (context.OverrideModel is null)
+            return GetClient(context.Role);
+
+        return new RoutingChatClient(
+            _router,
+            context,
+            _sink,
+            _loggerFactory.CreateLogger<RoutingChatClient>(),
+            _timeProvider);
+    }
 }
