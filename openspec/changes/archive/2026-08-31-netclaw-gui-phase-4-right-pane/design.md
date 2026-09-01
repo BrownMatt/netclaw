@@ -107,7 +107,11 @@ marks the entry matching the attached session's effective model
 (override when set, configured default otherwise), matched by provider
 key and model id; an untagged Ollama id matches its ":latest" tag,
 because /api/ps reports the tag while a configured model can omit it
-(found in the E2E smoke). The mark is GUI-side only.
+(found in the E2E smoke). The status endpoint is the only place the GUI
+can learn the configured model, so the Running models refresh also reads
+status as an input — one extra GET per tick, on that view only; the
+collapsed-pane and visible-view-only contracts are untouched. The mark
+is GUI-side only.
 
 ### D4. Client surface mirrors the endpoints one-to-one
 
