@@ -39,9 +39,10 @@
   names the platform. Verify: dry-run with `gui` on `win-x64` prints the
   GUI DRY RUN line; dry-run with `all` prints no GUI line.
 - [x] 3.3 Install smoke harnesses: add the `netclaw-gui` stand-in archive
-  to the `win-x64` checksum file only, and add checks for the opt-in
-  install, the `all` exclusion, and the non-Windows "no GUI published"
-  error (bash harness). Verify: `bash scripts/smoke/install-smoke.sh`
+  on one fixture platform (`win-x64` stable entry in the PowerShell
+  harness, `linux-x64` checksum file in the bash harness), and add checks
+  for the opt-in install, the `all` exclusion, and the "no GUI published"
+  error. Verify: `bash scripts/smoke/install-smoke.sh`
   and `./scripts/smoke/install-smoke.ps1` pass locally.
 
 ## 4. Self-update policy (D6)
