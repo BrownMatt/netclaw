@@ -12,13 +12,15 @@
 # add a second copy of these flags anywhere else.
 #
 # Usage:
-#   scripts/build/publish-binaries.sh --rid <rid> [--component cli|daemon|all]
+#   scripts/build/publish-binaries.sh --rid <rid> [--component cli|daemon|gui|core|all]
 #                                     [--output-dir <dir>] [--version <ver>]
 #
 #   --rid          required: linux-x64 | linux-arm64 | win-x64 | osx-arm64
-#   --component    cli | daemon | all   (default: all)
-#   --output-dir   base output dir; components land in <dir>/cli and
-#                  <dir>/daemon   (default: ./publish)
+#   --component    cli | daemon | gui | core | all   (default: all)
+#                  core = cli + daemon (what Docker and the smoke harness ship);
+#                  all  = cli + daemon + gui (what a release leg with the GUI ships)
+#   --output-dir   base output dir; components land in <dir>/cli,
+#                  <dir>/daemon, and <dir>/gui   (default: ./publish)
 #   --version      assembly version; when omitted, no -p:Version is passed
 #                  and the Directory.Build.props VersionPrefix is used
 set -euo pipefail
@@ -52,9 +54,16 @@ if [[ -z "$RID" ]]; then
   usage
 fi
 
+# Expand the selector into the component list. Component names are the closed
+# set shared with the release manifest, the installers, and
+# Netclaw.Configuration.Feeds.BinaryComponents: netclaw, netclawd, netclaw-gui.
 case "$COMPONENT" in
-  cli|daemon|all) ;;
-  *) echo "ERROR: --component must be cli, daemon, or all (got '$COMPONENT')" >&2; exit 2 ;;
+  cli)    COMPONENTS=(cli) ;;
+  daemon) COMPONENTS=(daemon) ;;
+  gui)    COMPONENTS=(gui) ;;
+  core)   COMPONENTS=(cli daemon) ;;
+  all)    COMPONENTS=(cli daemon gui) ;;
+  *) echo "ERROR: --component must be cli, daemon, gui, core, or all (got '$COMPONENT')" >&2; exit 2 ;;
 esac
 
 # Flags common to every platform.
@@ -101,11 +110,12 @@ publish_component() {
     -o "${OUTPUT_DIR}/${name}"
 }
 
-if [[ "$COMPONENT" == "cli" || "$COMPONENT" == "all" ]]; then
-  publish_component cli src/Netclaw.Cli/Netclaw.Cli.csproj
-fi
-if [[ "$COMPONENT" == "daemon" || "$COMPONENT" == "all" ]]; then
-  publish_component daemon src/Netclaw.Daemon/Netclaw.Daemon.csproj
-fi
+for component in "${COMPONENTS[@]}"; do
+  case "$component" in
+    cli)    publish_component cli    src/Netclaw.Cli/Netclaw.Cli.csproj ;;
+    daemon) publish_component daemon src/Netclaw.Daemon/Netclaw.Daemon.csproj ;;
+    gui)    publish_component gui    src/Netclaw.Gui/Netclaw.Gui.csproj ;;
+  esac
+done
 
 echo "✓ publish-binaries.sh: ${COMPONENT} (${RID}) → ${OUTPUT_DIR}"

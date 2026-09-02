@@ -186,6 +186,30 @@ image, and the system skills feed). The pushed tag MUST match `Directory.Build.p
 `<VersionPrefix>` for a stable tag, and `<VersionPrefix>` + `<VersionSuffix>` for a
 prerelease — or the workflow's version gate fails the release.
 
+### Release components
+
+A release ships three components. The component name is also the binary name,
+the archive prefix (`<component>-<version>-<rid>.<ext>`), and the `component`
+value in the feed manifest. `Netclaw.Configuration.Feeds.BinaryComponents`,
+`scripts/build/publish-binaries.sh`, `feeds/scripts/generate-release-manifest.sh`,
+and the install scripts all carry the same closed set — change them together.
+
+| Component | Binary | Platforms | Installed by |
+|---|---|---|---|
+| `netclaw` | CLI | all four RIDs | installers (`all`, `cli`), `netclaw update` |
+| `netclawd` | daemon | all four RIDs | installers (`all`, `daemon`), `netclaw update`, Docker image |
+| `netclaw-gui` | desktop GUI (Avalonia) | `win-x64` only | installers with the explicit `gui` component; `netclaw update` only when the GUI is already installed |
+
+The GUI is opt-in: the installers' `all` means the core set (CLI + daemon),
+because the default install target is a headless host. `netclaw update`
+never adds the GUI to a host that does not have it.
+
+Each leg of the release matrix in `publish_release_binaries.yml` carries a
+`gui: true|false` switch. To ship the GUI for another platform, flip that
+leg's switch — the package and upload steps already branch on it. The
+publish script's `--component core` (CLI + daemon) is what Docker and the
+smoke harness build; `all` adds the GUI.
+
 ### Stable release
 
 1. Bump `<VersionPrefix>` in `Directory.Build.props` (e.g. `0.22.1` → `0.22.2`); leave

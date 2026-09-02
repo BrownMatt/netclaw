@@ -173,3 +173,8 @@ instead of launching a detached daemon. If restart fails, inspect
 `systemctl --user status netclaw.service`, then start it manually with
 `systemctl --user start netclaw.service` or fall back to `netclaw daemon start`
 only when no systemd user service owns the daemon.
+
+`netclaw update` always installs the core components (`netclaw`, `netclawd`).
+It installs the desktop GUI (`netclaw-gui`) only when that binary is already in
+the install directory. To add the GUI to a host, run the install script with the
+`gui` component (`install.ps1 -Component gui`; the GUI ships for `win-x64`).

@@ -177,9 +177,18 @@ internal static class UpdateCommand
             return 1;
         }
 
+        var installDir = GetInstallDirectory();
+        var assetsToInstall = SelectAssetsToInstall(result.MatchingAssets, installDir, OperatingSystem.IsWindows());
+        if (assetsToInstall.Count == 0)
+        {
+            output.WriteLine();
+            output.WriteLine("This release carries no binary for a component installed here. Nothing to install.");
+            return 0;
+        }
+
         // Show what will be downloaded
         output.WriteLine();
-        foreach (var asset in result.MatchingAssets)
+        foreach (var asset in assetsToInstall)
         {
             var sizeMb = asset.SizeBytes / (1024.0 * 1024.0);
             output.WriteLine($"  {asset.Component} ({asset.Rid}) — {sizeMb:F1} MB");
@@ -197,21 +206,58 @@ internal static class UpdateCommand
             }
         }
 
-        return await PerformUpdateAsync(result, paths, httpClient);
+        return await PerformUpdateAsync(result, assetsToInstall, installDir, paths, httpClient);
     }
 
-    private static async Task<int> PerformUpdateAsync(
-        UpdateCheckResult result, NetclawPaths paths, HttpClient httpClient)
+    /// <summary>
+    /// Selects which host-platform assets this update writes. Core components
+    /// are always installed. An optional component (the GUI) is installed only
+    /// when its binary already sits in <paramref name="installDir"/>, so an
+    /// update never widens the install footprint without an operator choice.
+    /// Optional assets are ordered last: a failed swap on an optional binary
+    /// then leaves the core binaries already updated, and the per-binary
+    /// rollback restores only the optional one.
+    /// </summary>
+    internal static IReadOnlyList<BinaryAsset> SelectAssetsToInstall(
+        IEnumerable<BinaryAsset> hostAssets, string installDir, bool isWindows)
     {
-        var installDir = GetInstallDirectory();
+        var core = new List<BinaryAsset>();
+        var optional = new List<BinaryAsset>();
+        foreach (var asset in hostAssets)
+        {
+            if (!BinaryComponents.IsOptional(asset.Component))
+            {
+                core.Add(asset);
+                continue;
+            }
+
+            if (File.Exists(Path.Combine(installDir, BinaryFileName(asset.Component, isWindows))))
+                optional.Add(asset);
+        }
+
+        core.AddRange(optional);
+        return core;
+    }
+
+    private static string BinaryFileName(string component, bool isWindows)
+        => isWindows ? $"{component}.exe" : component;
+
+    private static async Task<int> PerformUpdateAsync(
+        UpdateCheckResult result,
+        IReadOnlyList<BinaryAsset> assetsToInstall,
+        string installDir,
+        NetclawPaths paths,
+        HttpClient httpClient)
+    {
         var tempDir = Path.Combine(Path.GetTempPath(), $"netclaw-update-{Guid.NewGuid():N}");
         Directory.CreateDirectory(tempDir);
 
         try
         {
-            // Download and verify each asset
-            var extractedPaths = new Dictionary<string, string>();
-            foreach (var asset in result.MatchingAssets)
+            // Download and verify each asset. Insertion order is preserved so
+            // the swap loop below installs core binaries before optional ones.
+            var extractedPaths = new List<(string Component, string ExtractDir)>();
+            foreach (var asset in assetsToInstall)
             {
                 Console.Write($"Downloading {asset.Component}...");
                 var archivePath = Path.Combine(tempDir, Path.GetFileName(new Uri(asset.Url).AbsolutePath));
@@ -230,7 +276,7 @@ internal static class UpdateCommand
                 else if (archivePath.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
                     ZipFile.ExtractToDirectory(archivePath, extractDir);
 
-                extractedPaths[asset.Component] = extractDir;
+                extractedPaths.Add((asset.Component, extractDir));
             }
 
             // Check if daemon is running (we'll need to restart it)
@@ -260,9 +306,7 @@ internal static class UpdateCommand
 
             foreach (var (component, extractDir) in extractedPaths)
             {
-                var binaryName = OperatingSystem.IsWindows()
-                    ? $"{component}.exe"
-                    : component;
+                var binaryName = BinaryFileName(component, OperatingSystem.IsWindows());
 
                 var sourcePath = FindBinaryInExtracted(extractDir, binaryName);
                 if (sourcePath is null)
@@ -330,9 +374,7 @@ internal static class UpdateCommand
                 : null;
             foreach (var (component, _) in extractedPaths)
             {
-                var binaryName = OperatingSystem.IsWindows()
-                    ? $"{component}.exe"
-                    : component;
+                var binaryName = BinaryFileName(component, OperatingSystem.IsWindows());
                 var backupPath = Path.Combine(installDir, binaryName + ".backup");
                 CleanupBackupFile(backupPath, runningBackupPath, OperatingSystem.IsWindows());
             }

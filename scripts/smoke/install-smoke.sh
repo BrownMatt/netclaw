@@ -26,6 +26,11 @@ MANIFEST_GEN="$ROOT_DIR/feeds/scripts/generate-release-manifest.sh"
 VERSION="0.0.0"          # stable → latest
 BETA_VERSION="0.0.1-beta1"  # prerelease → latest-prerelease
 RIDS="linux-x64 linux-arm64 osx-arm64"
+# The fixture publishes the opt-in netclaw-gui component for ONE RID. That is a
+# harness choice (the real release ships the GUI for win-x64): it lets the real
+# installer prove the `gui` opt-in path, the `all` exclusion, and the
+# "GUI requested where none is published" error against one feed.
+GUI_RID="linux-x64"
 
 PASS=0
 FAIL=0
@@ -77,9 +82,10 @@ size_of() { stat -c%s "$1" 2>/dev/null || stat -f%z "$1"; }
 indent() { while IFS= read -r line || [ -n "$line" ]; do printf '    %s\n' "$line"; done; }
 
 # ── 1. Stand-in binaries ─────────────────────────────────────────────────────
-# The installer only cares about a file named `netclaw` / `netclawd` inside the
-# archive — a one-line script is a sufficient stand-in and keeps this instant.
-for name in netclaw netclawd; do
+# The installer only cares about a file named `netclaw` / `netclawd` /
+# `netclaw-gui` inside the archive — a one-line script is a sufficient stand-in
+# and keeps this instant.
+for name in netclaw netclawd netclaw-gui; do
   cat > "$WORK/bin/$name" <<EOF
 #!/usr/bin/env sh
 echo "$name $VERSION-smoke"
@@ -100,6 +106,11 @@ for ver in "$VERSION" "$BETA_VERSION"; do
     {
       echo "$(sha256_of "$SERVE/$ver/$cli")  $cli  $(size_of "$SERVE/$ver/$cli")"
       echo "$(sha256_of "$SERVE/$ver/$daemon")  $daemon  $(size_of "$SERVE/$ver/$daemon")"
+      if [ "$rid" = "$GUI_RID" ]; then
+        gui="netclaw-gui-$ver-$rid.tar.gz"
+        tar czf "$SERVE/$ver/$gui" -C "$WORK/bin" netclaw-gui
+        echo "$(sha256_of "$SERVE/$ver/$gui")  $gui  $(size_of "$SERVE/$ver/$gui")"
+      fi
     } > "$WORK/checksums-$ver/checksums-$rid.txt"
   done
 done
@@ -110,10 +121,38 @@ BASE_URL="http://127.0.0.1:$PORT"
 # Start from a clean slate so the generator's latest/latestPrerelease are computed
 # from only our two test versions (cleanup restores prior feed files).
 rm -f "$MANIFEST_DEST"
+
+# The generator must refuse an archive name outside the closed component set
+# before it writes anything — an unknown name is a pipeline bug, not an asset.
+mkdir -p "$WORK/checksums-bogus"
+bogus="netclaw-extra-$VERSION-linux-x64.tar.gz"
+echo "0000000000000000000000000000000000000000000000000000000000000000  $bogus  1" \
+  > "$WORK/checksums-bogus/checksums-linux-x64.txt"
+set +e
+bogus_out=$(bash "$MANIFEST_GEN" "$VERSION" "$WORK/checksums-bogus" "$BASE_URL" 2>&1)
+bogus_rc=$?
+set -e
+if [ "$bogus_rc" -ne 0 ] && echo "$bogus_out" | grep -qF "$bogus" && [ ! -f "$MANIFEST_DEST" ]; then
+  pass "feed: generator rejects an unknown component archive before writing a manifest"
+else
+  fail "feed: generator accepted '$bogus' (exit=$bogus_rc, manifest present: $([ -f "$MANIFEST_DEST" ] && echo yes || echo no))"
+  echo "$bogus_out" | indent
+fi
+
 # Run the REAL generator once per version; it accumulates releases[] and recomputes
 # latest (newest stable) + latestPrerelease (newest of all) across both.
 bash "$MANIFEST_GEN" "$VERSION"      "$WORK/checksums-$VERSION"      "$BASE_URL" >/dev/null
 bash "$MANIFEST_GEN" "$BETA_VERSION" "$WORK/checksums-$BETA_VERSION" "$BASE_URL" >/dev/null
+
+# The GUI archive maps to its own component — never to the `netclaw` prefix and
+# never to the raw file name.
+if grep -q '"component": "netclaw-gui"' "$MANIFEST_DEST" \
+    && ! grep -q '"component": "netclaw-gui-' "$MANIFEST_DEST"; then
+  pass "feed: netclaw-gui archive maps to component netclaw-gui"
+else
+  fail "feed: netclaw-gui archive did not map to component netclaw-gui"
+  grep '"component"' "$MANIFEST_DEST" | indent
+fi
 
 if [ "$(tr -d '\r\n' < "$ROOT_DIR/feeds/releases/latest")" = "$VERSION" ]; then
   pass "feed: latest pointer selects the newest stable version"
@@ -161,16 +200,17 @@ exit 1
 EOF
 chmod +x "$SHIM/uname" "$SHIM/sysctl"
 
-# check_detect <desc> <FAKE_OS> <FAKE_ARCH> <FAKE_TRANSLATED> <expect-regex> <expect-exit>
+# check_detect <desc> <FAKE_OS> <FAKE_ARCH> <FAKE_TRANSLATED> <expect-regex> <expect-exit> [install.sh args...]
 check_detect() {
   local desc="$1" fos="$2" farch="$3" ftrans="$4" expect="$5" want_rc="$6"
+  shift 6
   local out rc
   set +e
   out=$(FAKE_OS="$fos" FAKE_ARCH="$farch" FAKE_TRANSLATED="$ftrans" \
         PATH="$SHIM:$PATH" \
         FEED_BASE_URL="$BASE_URL" \
         INSTALL_DIR="$WORK/should-not-exist" \
-        bash "$INSTALL_SH" --dry-run 2>&1)
+        bash "$INSTALL_SH" --dry-run "$@" 2>&1)
   rc=$?
   set -e
   if [ "$rc" -eq "$want_rc" ] && echo "$out" | grep -Eq "$expect"; then
@@ -188,6 +228,26 @@ check_detect "macOS arm64 -> osx-arm64"         Darwin arm64   0 'DRY RUN: would
 check_detect "macOS x86_64 + Rosetta -> osx-arm64" Darwin x86_64 1 'DRY RUN: would install netclaw .*-osx-arm64\.tar\.gz' 0
 check_detect "Intel Mac rejected"               Darwin x86_64  0 'Apple Silicon'    1
 check_detect "unsupported OS rejected"          freebsd x86_64 0 'Unsupported OS'   1
+
+echo ""
+echo "=== component selection ==="
+# `all` is the core set: the GUI never rides along on a default install.
+set +e
+all_out=$(FAKE_OS=linux FAKE_ARCH=x86_64 FAKE_TRANSLATED=0 PATH="$SHIM:$PATH" \
+          FEED_BASE_URL="$BASE_URL" INSTALL_DIR="$WORK/should-not-exist" \
+          bash "$INSTALL_SH" --dry-run 2>&1)
+all_rc=$?
+set -e
+if [ "$all_rc" -eq 0 ] && ! echo "$all_out" | grep -q "netclaw-gui"; then
+  pass "component: default install excludes netclaw-gui"
+else
+  fail "component: default install mentioned netclaw-gui or failed (exit=$all_rc)"
+  echo "$all_out" | indent
+fi
+check_detect "gui opt-in on a RID that publishes it" linux x86_64 0 \
+  'DRY RUN: would install netclaw-gui .*-linux-x64\.tar\.gz' 0 gui
+check_detect "gui requested where none is published fails loudly" linux aarch64 0 \
+  'publishes no netclaw-gui binary for linux-arm64' 1 gui
 
 set +e
 invalid_path_out=$(INSTALL_DIR="$WORK/invalid:path" \
@@ -286,6 +346,29 @@ for name in netclaw netclawd; do
     fail "install: $name missing, not executable, or did not run"
   fi
 done
+if [ -e "$INSTALL_DIR/netclaw-gui" ]; then
+  fail "install: default install placed netclaw-gui"
+else
+  pass "install: default install did not place netclaw-gui"
+fi
+
+# A real opt-in GUI install, only when the host is the fixture's GUI RID.
+if [ "$(uname -s)" = "Linux" ] && [ "$(uname -m)" = "x86_64" ]; then
+  GUI_INSTALL_DIR="$WORK/gui-install"
+  set +e
+  gui_out=$(FEED_BASE_URL="$BASE_URL" INSTALL_DIR="$GUI_INSTALL_DIR" \
+            bash "$INSTALL_SH" gui --skip-shell 2>&1)
+  gui_rc=$?
+  set -e
+  if [ "$gui_rc" -eq 0 ] && [ -x "$GUI_INSTALL_DIR/netclaw-gui" ] \
+      && "$GUI_INSTALL_DIR/netclaw-gui" | grep -q "netclaw-gui" \
+      && [ ! -e "$GUI_INSTALL_DIR/netclaw" ]; then
+    pass "install: gui opt-in installs only netclaw-gui"
+  else
+    fail "install: gui opt-in (exit=$gui_rc)"
+    echo "$gui_out" | indent
+  fi
+fi
 
 # Verify shell integration actually ran
 INSTALL_ENV="$INSTALL_HOME/.netclaw/env"

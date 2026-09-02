@@ -54,10 +54,23 @@ for checksums_file in "$CHECKSUMS_DIR"/checksums-*.txt; do
         filename=$(echo "$line" | awk '{print $2}')
         size_bytes=$(echo "$line" | awk '{print $3}')
 
-        # Determine component from filename
-        # netclaw-0.2.0-linux-x64.tar.gz -> netclaw
-        # netclawd-0.2.0-linux-x64.tar.gz -> netclawd
-        component=$(echo "$filename" | sed -E "s/^(netclawd?)-${VERSION}-.*/\1/")
+        # Determine component from filename against the closed component set
+        # (the same names as Netclaw.Configuration.Feeds.BinaryComponents).
+        # Longest name first, so netclaw-gui-… never maps to netclaw:
+        #   netclaw-gui-0.2.0-win-x64.zip     -> netclaw-gui
+        #   netclawd-0.2.0-linux-x64.tar.gz   -> netclawd
+        #   netclaw-0.2.0-linux-x64.tar.gz    -> netclaw
+        # Any other name is a pipeline bug: fail before a manifest is written
+        # rather than publish an asset under a name no installer understands.
+        case "$filename" in
+            "netclaw-gui-${VERSION}-"*) component="netclaw-gui" ;;
+            "netclawd-${VERSION}-"*)    component="netclawd" ;;
+            "netclaw-${VERSION}-"*)     component="netclaw" ;;
+            *)
+                echo "Error: '$filename' in $(basename "$checksums_file") does not match a known component archive for version $VERSION" >&2
+                echo "  Expected <component>-${VERSION}-<rid>.<ext> with component netclaw, netclawd, or netclaw-gui" >&2
+                exit 1 ;;
+        esac
 
         # Build download URL
         url="${BASE_URL}/${VERSION}/${filename}"

@@ -371,6 +371,73 @@ public sealed class UpdateCommandTests : IDisposable
     }
 
     [Fact]
+    public void SelectAssetsToInstall_SkipsOptionalComponent_WhenNotInstalled()
+    {
+        var assets = new[]
+        {
+            Asset(BinaryComponents.Gui),
+            Asset(BinaryComponents.Cli),
+            Asset(BinaryComponents.Daemon),
+        };
+
+        var selected = UpdateCommand.SelectAssetsToInstall(assets, _dir.Path, isWindows: true);
+
+        Assert.Equal([BinaryComponents.Cli, BinaryComponents.Daemon], selected.Select(a => a.Component));
+    }
+
+    [Fact]
+    public void SelectAssetsToInstall_KeepsOptionalComponentLast_WhenInstalled()
+    {
+        File.WriteAllText(Path.Combine(_dir.Path, "netclaw-gui.exe"), "installed gui");
+        var assets = new[]
+        {
+            Asset(BinaryComponents.Gui),
+            Asset(BinaryComponents.Cli),
+            Asset(BinaryComponents.Daemon),
+        };
+
+        var selected = UpdateCommand.SelectAssetsToInstall(assets, _dir.Path, isWindows: true);
+
+        Assert.Equal(
+            [BinaryComponents.Cli, BinaryComponents.Daemon, BinaryComponents.Gui],
+            selected.Select(a => a.Component));
+    }
+
+    [Fact]
+    public void SelectAssetsToInstall_UsesPlatformFileName_ForOptionalPresence()
+    {
+        // A Windows-named GUI binary does not count on a non-Windows host.
+        File.WriteAllText(Path.Combine(_dir.Path, "netclaw-gui.exe"), "installed gui");
+
+        var selected = UpdateCommand.SelectAssetsToInstall([Asset(BinaryComponents.Gui)], _dir.Path, isWindows: false);
+
+        Assert.Empty(selected);
+    }
+
+    [Fact]
+    public void EvaluateManifest_ReportsUpdate_WhenOnlyOptionalAssetMatchesHost()
+    {
+        var rid = UpdateCheckService.GetCurrentRid();
+        var manifest = CreateManifest("99.0.0", rid);
+        manifest.Releases[0].Assets.Clear();
+        manifest.Releases[0].Assets.Add(Asset(BinaryComponents.Gui, rid));
+
+        var result = UpdateCheckService.EvaluateManifest(manifest, "1.0.0", UpdateChannel.Stable);
+
+        Assert.True(result.IsUpdateAvailable);
+        Assert.Empty(UpdateCommand.SelectAssetsToInstall(result.MatchingAssets, _dir.Path, isWindows: OperatingSystem.IsWindows()));
+    }
+
+    private static BinaryAsset Asset(string component, string rid = "win-x64") => new()
+    {
+        Component = component,
+        Rid = rid,
+        Url = $"https://releases.netclaw.dev/1.0.0/{component}-1.0.0-{rid}.zip",
+        Sha256 = "abc123",
+        SizeBytes = 1,
+    };
+
+    [Fact]
     public void CleanupBackupFile_Deletes_OtherComponentBackup_OnWindows()
     {
         var backupPath = Path.Combine(_dir.Path, "netclawd.exe.backup");

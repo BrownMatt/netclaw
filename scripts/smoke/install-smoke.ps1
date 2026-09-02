@@ -96,7 +96,7 @@ New-Item -ItemType Directory -Path $Serve, $BinDir -Force | Out-Null
 $ServerProc = $null
 try {
     # 1. Stand-in binaries - install.ps1 only needs a file named <component>.exe
-    foreach ($name in @("netclaw", "netclawd")) {
+    foreach ($name in @("netclaw", "netclawd", "netclaw-gui")) {
         Set-Content -Path (Join-Path $BinDir "$name.exe") -Value "stand-in $name" -NoNewline
     }
 
@@ -110,11 +110,15 @@ try {
     # 3. Package zip archives for a stable AND a prerelease, and write a manifest with
     #    latest (stable) + latestPrerelease (prerelease). Two versions let us prove
     #    channel selection: default -> latest, -Channel beta -> latestPrerelease.
-    function New-ReleaseEntry([string]$ver) {
+    # The opt-in netclaw-gui component rides only on the stable entry, so the
+    # beta entry doubles as "a release that publishes no GUI for this RID".
+    function New-ReleaseEntry([string]$ver, [bool]$IncludeGui) {
         $verDir = Join-Path $Serve $ver
         New-Item -ItemType Directory -Path $verDir -Force | Out-Null
         $entryAssets = @()
-        foreach ($comp in @("netclaw", "netclawd")) {
+        $components = @("netclaw", "netclawd")
+        if ($IncludeGui) { $components += "netclaw-gui" }
+        foreach ($comp in $components) {
             $archiveName = "$comp-$ver-$Rid.zip"
             $archivePath = Join-Path $verDir $archiveName
             Compress-Archive -Path (Join-Path $BinDir "$comp.exe") -DestinationPath $archivePath -Force
@@ -130,8 +134,8 @@ try {
         return [ordered]@{ version = $ver; assets = $entryAssets }
     }
 
-    $stableEntry = New-ReleaseEntry $Version
-    $betaEntry = New-ReleaseEntry $BetaVersion
+    $stableEntry = New-ReleaseEntry $Version $true
+    $betaEntry = New-ReleaseEntry $BetaVersion $false
 
     $manifest = [ordered]@{
         schemaVersion    = 1
@@ -144,13 +148,16 @@ try {
     # -Encoding UTF8 while PowerShell 7 does not, so use an identical encoding.
     $manifest | ConvertTo-Json -Depth 8 | Set-Content -Path (Join-Path $Serve "manifest.json") -Encoding ascii
 
-    # 4. Serve the manifest + archives from localhost
+    # 4. Serve the manifest + archives from localhost. Start-Process does not
+    #    quote array arguments, so the directory is quoted by hand: a temp path
+    #    with a space (C:\Users\First Last\...) would otherwise split into two
+    #    arguments, and the server would exit before it ever listened.
     $python = Get-Command python3 -ErrorAction SilentlyContinue
     if (-not $python) { $python = Get-Command python -ErrorAction SilentlyContinue }
     if (-not $python) { throw "python is required to run the local manifest server" }
 
     $ServerProc = Start-Process -FilePath $python.Source -PassThru -NoNewWindow `
-        -ArgumentList @("-m", "http.server", "$Port", "--bind", "127.0.0.1", "--directory", $Serve) `
+        -ArgumentList @("-m", "http.server", "$Port", "--bind", "127.0.0.1", "--directory", "`"$Serve`"") `
         -RedirectStandardOutput (Join-Path $Work "http.out") `
         -RedirectStandardError (Join-Path $Work "http.err")
 
@@ -185,6 +192,40 @@ try {
     } else {
         Pass "dry-run: installed nothing"
     }
+    if ($dryOut -notmatch 'netclaw-gui') {
+        Pass "dry-run: default install excludes netclaw-gui"
+    } else {
+        Fail "dry-run: default install mentioned netclaw-gui"
+    }
+
+    # 5b. Component selection - the GUI is opt-in, and a release without it fails loudly
+    Write-Host ""
+    Write-Host "=== component selection ==="
+    $guiDryOut = & $PowerShellExecutable -NoProfile -File $InstallPs1 -InstallDir $dryDir -Component gui -DryRun 2>&1 | Out-String
+    if ($LASTEXITCODE -eq 0 -and $guiDryOut -match 'DRY RUN: would install netclaw-gui ') {
+        Pass "component: -Component gui resolves netclaw-gui"
+    } else {
+        Fail "component: -Component gui did not resolve netclaw-gui (exit=$LASTEXITCODE)"
+        Write-Host ($guiDryOut.TrimEnd())
+    }
+    $noGuiResult = Invoke-CapturedPowerShell -Arguments @(
+        "-NoProfile", "-File", $InstallPs1, "-InstallDir", $dryDir,
+        "-Component", "gui", "-Channel", "beta", "-DryRun")
+    if ($noGuiResult.ExitCode -ne 0 -and $noGuiResult.Output -match "publishes no netclaw-gui for $Rid") {
+        Pass "component: gui requested where none is published fails loudly"
+    } else {
+        Fail "component: gui on a release without it (exit=$($noGuiResult.ExitCode))"
+        Write-Host ($noGuiResult.Output.TrimEnd())
+    }
+    $guiInstallDir = Join-Path $Work "gui-installed"
+    & $PowerShellExecutable -NoProfile -File $InstallPs1 -InstallDir $guiInstallDir -Component gui -SkipShell 2>&1 | Out-Null
+    $guiExe = Join-Path $guiInstallDir "netclaw-gui.exe"
+    if ((Test-Path $guiExe) -and ((Get-Item $guiExe).Length -gt 0) `
+        -and -not (Test-Path (Join-Path $guiInstallDir "netclaw.exe"))) {
+        Pass "component: -Component gui installs only netclaw-gui.exe"
+    } else {
+        Fail "component: -Component gui install (gui present: $(Test-Path $guiExe))"
+    }
 
     # 6. Real install of the stand-in archives
     Write-Host ""
@@ -211,6 +252,11 @@ try {
         } else {
             Fail "install: $name.exe missing or empty"
         }
+    }
+    if (Test-Path (Join-Path $installDir "netclaw-gui.exe")) {
+        Fail "install: default install placed netclaw-gui.exe"
+    } else {
+        Pass "install: default install did not place netclaw-gui.exe"
     }
 
     # 7. Verify the real installer changed User PATH without replacing the

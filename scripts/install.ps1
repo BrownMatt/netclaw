@@ -4,6 +4,7 @@
 #   iwr -useb https://releases.netclaw.dev/install.ps1 | iex
 #   .\install.ps1 -Component cli
 #   .\install.ps1 -Component daemon
+#   .\install.ps1 -Component gui     # Desktop GUI only (opt-in; not part of "all")
 #   .\install.ps1 -InstallDir C:\tools\netclaw
 #   .\install.ps1 -Channel beta      # Opt into prereleases
 #   .\install.ps1 -DryRun
@@ -13,7 +14,8 @@
 # exists). -Version pins an exact version and overrides -Channel (e.g. 0.19.0-beta.1).
 
 param(
-    [ValidateSet("all", "cli", "daemon")]
+    # "all" is the core set (cli + daemon). The desktop GUI is opt-in with "gui".
+    [ValidateSet("all", "cli", "daemon", "gui")]
     [string]$Component = "all",
 
     [string]$InstallDir = "",
@@ -186,7 +188,7 @@ try {
         $asset = $release.assets | Where-Object { $_.component -eq $ComponentName -and $_.rid -eq $rid } | Select-Object -First 1
 
         if (-not $asset) {
-            Write-Warning "No $ComponentName binary found for $rid in version $targetVersion"
+            Write-Warning "No $ComponentName binary found for $rid in version $targetVersion (release $targetVersion publishes no $ComponentName for $rid)"
             return $false
         }
 
@@ -240,6 +242,9 @@ try {
     }
     if ($Component -eq "all" -or $Component -eq "daemon") {
         if (-not (Install-Component "netclawd")) { $success = $false }
+    }
+    if ($Component -eq "gui") {
+        if (-not (Install-Component "netclaw-gui")) { $success = $false }
     }
 
     if (-not $success) {

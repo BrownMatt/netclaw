@@ -71,7 +71,7 @@ jobs:
         run: |
           chmod +x scripts/build/publish-binaries.sh
           scripts/build/publish-binaries.sh \
-            --rid ${{ matrix.rid }} --component all --output-dir ./publish
+            --rid ${{ matrix.rid }} --component core --output-dir ./publish
 
       # The mcp-setup scenario registers this as a stdio MCP server. Published
       # self-contained single-file so the SDK-less smoke job can run it.

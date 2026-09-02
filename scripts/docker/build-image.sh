@@ -55,7 +55,8 @@ echo "  NO_BUILD:         $NO_BUILD"
 # harness. Docker-specific logic (NO_BUILD, arch-suffixed copy, the RID guard
 # below) stays here; only the publish flags are delegated.
 if [[ "$NO_BUILD" != "1" ]]; then
-    pub_args=(--rid "$RID" --component all --output-dir ./publish)
+    # `core` = cli + daemon. The image never carries the GUI component.
+    pub_args=(--rid "$RID" --component core --output-dir ./publish)
     if [[ -n "$ASSEMBLY_VERSION" ]]; then
         pub_args+=(--version "$ASSEMBLY_VERSION")
     fi

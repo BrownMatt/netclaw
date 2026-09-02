@@ -101,6 +101,12 @@ jobs:
   # ────────────────────────────────────────────────────────────────────
   # Job 2: Build self-contained binaries
   # (matrix: linux-x64, linux-arm64, win-x64, osx-arm64)
+  #
+  # `gui` is the per-platform switch for the netclaw-gui component. A leg
+  # with `gui: true` publishes cli + daemon + gui and ships the GUI archive;
+  # every other leg publishes the core set only. To ship the GUI on another
+  # platform, flip its switch — the package and upload steps already branch
+  # on it.
   # ────────────────────────────────────────────────────────────────────
   publish-binaries:
     name: Build ${{ matrix.rid }}
@@ -113,15 +119,19 @@ jobs:
           - os: ubuntu-latest
             rid: linux-x64
             archive_ext: tar.gz
+            gui: false
           - os: ubuntu-latest
             rid: linux-arm64
             archive_ext: tar.gz
+            gui: false
           - os: windows-latest
             rid: win-x64
             archive_ext: zip
+            gui: true
           - os: macos-26
             rid: osx-arm64
             archive_ext: tar.gz
+            gui: false
     steps:
     - name: Checkout
       uses: actions/checkout@v7
@@ -143,7 +153,7 @@ jobs:
       run: >
         bash scripts/build/publish-binaries.sh
         --rid ${{ matrix.rid }}
-        --component all
+        --component ${{ matrix.gui && 'all' || 'core' }}
         --output-dir ./publish
         --version ${{ github.ref_name }}
 
@@ -191,6 +201,12 @@ jobs:
         tar czf "./archives/netclawd-${VERSION}-${RID}.tar.gz" \
           -C ./publish/daemon netclawd
 
+        # GUI archive (only on a leg with the gui switch on)
+        if [ "${{ matrix.gui }}" = "true" ]; then
+          tar czf "./archives/netclaw-gui-${VERSION}-${RID}.tar.gz" \
+            -C ./publish/gui netclaw-gui
+        fi
+
     - name: Package archives (Windows)
       if: runner.os == 'Windows'
       shell: pwsh
@@ -206,6 +222,12 @@ jobs:
         # Daemon archive
         Compress-Archive -Path ./publish/daemon/netclawd.exe `
           -DestinationPath "./archives/netclawd-${VERSION}-${RID}.zip"
+
+        # GUI archive (only on a leg with the gui switch on)
+        if ("${{ matrix.gui }}" -eq "true") {
+          Compress-Archive -Path ./publish/gui/netclaw-gui.exe `
+            -DestinationPath "./archives/netclaw-gui-${VERSION}-${RID}.zip"
+        }
 
     - name: Compute checksums
       shell: bash
@@ -258,6 +280,18 @@ jobs:
         wrangler r2 object put
         netclaw-releases/${{ github.ref_name }}/netclawd-${{ github.ref_name }}-${{ matrix.rid }}.${{ matrix.archive_ext }}
         --file=./archives/netclawd-${{ github.ref_name }}-${{ matrix.rid }}.${{ matrix.archive_ext }}
+        --content-type=application/octet-stream
+
+    - name: Upload GUI archive to R2
+      if: matrix.gui
+      shell: bash
+      env:
+        CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      run: >
+        wrangler r2 object put
+        netclaw-releases/${{ github.ref_name }}/netclaw-gui-${{ github.ref_name }}-${{ matrix.rid }}.${{ matrix.archive_ext }}
+        --file=./archives/netclaw-gui-${{ github.ref_name }}-${{ matrix.rid }}.${{ matrix.archive_ext }}
         --content-type=application/octet-stream
 
     - name: Upload checksum artifacts

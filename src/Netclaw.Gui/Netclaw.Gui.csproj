@@ -2,6 +2,11 @@
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
+    <!-- The binary name is the release component name (netclaw-gui), the same
+         convention as netclaw / netclawd. Installers and `netclaw update` derive
+         the file name from the component name. -->
+    <AssemblyName>netclaw-gui</AssemblyName>
+    <RootNamespace>Netclaw.Gui</RootNamespace>
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>

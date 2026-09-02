@@ -207,8 +207,9 @@ if [[ -n "${NETCLAW_SMOKE_CLI:-}" && -n "${NETCLAW_SMOKE_DAEMON:-}" ]]; then
 else
   echo "==> Publishing binaries via publish-binaries.sh (rid=${SMOKE_RID})..."
   publish_out="${RUN_ROOT}/publish"
+  # `core` = cli + daemon; the smoke harness never launches the GUI.
   bash "${ROOT_DIR}/scripts/build/publish-binaries.sh" \
-    --rid "$SMOKE_RID" --component all --output-dir "$publish_out"
+    --rid "$SMOKE_RID" --component core --output-dir "$publish_out"
   NETCLAW_SMOKE_CLI="${publish_out}/cli/netclaw"
   NETCLAW_SMOKE_DAEMON="${publish_out}/daemon/netclawd"
 fi

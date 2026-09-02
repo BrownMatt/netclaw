@@ -5,12 +5,16 @@
 #   curl -sSL https://releases.netclaw.dev/install.sh | bash
 #   curl -sSL https://releases.netclaw.dev/install.sh | bash -s -- cli            # CLI only
 #   curl -sSL https://releases.netclaw.dev/install.sh | bash -s -- daemon         # Daemon only
+#   curl -sSL https://releases.netclaw.dev/install.sh | bash -s -- gui            # Desktop GUI only (where published)
 #   curl -sSL https://releases.netclaw.dev/install.sh | bash -s -- --channel beta # Opt into prereleases
 #   curl -sSL https://releases.netclaw.dev/install.sh | bash -s -- --skip-shell   # Don't modify shell profile
 #   INSTALL_DIR=/opt/netclaw curl -sSL https://releases.netclaw.dev/install.sh | bash
 #
 # Arguments:
-#   all|cli|daemon          — Which component(s) to install (default: all)
+#   all|cli|daemon|gui      — Which component(s) to install (default: all).
+#                             `all` is the core set (cli + daemon); the desktop
+#                             GUI is opt-in with `gui` and exists only for the
+#                             platforms a release publishes it for.
 #   --channel stable|beta   — Release channel (default: stable). 'beta' installs the
 #                             newest prerelease (or latest stable if no prerelease exists).
 #   --dry-run               — Resolve and report what would happen; install nothing.
@@ -34,7 +38,7 @@ fi
 FEED_BASE_URL="${FEED_BASE_URL:-https://releases.netclaw.dev}"
 
 # ── Argument parsing ──
-COMPONENT="all"        # "all", "cli", or "daemon"
+COMPONENT="all"        # "all" (cli + daemon), "cli", "daemon", or "gui"
 DRY_RUN=false          # --dry-run: resolve and report what would happen, install nothing
 CHANNEL="stable"       # release channel: "stable" (default) or "beta" (opt into prereleases)
 CHANNEL_EXPLICIT=false # true when --channel was explicitly passed
@@ -49,8 +53,8 @@ while [ $# -gt 0 ]; do
             fi
             CHANNEL="$2"; CHANNEL_EXPLICIT=true; shift 2 ;;
         --channel=*) CHANNEL="${1#*=}"; CHANNEL_EXPLICIT=true; shift ;;
-        all|cli|daemon) COMPONENT="$1"; shift ;;
-        *) echo "Usage: install.sh [all|cli|daemon] [--channel stable|beta] [--dry-run] [--skip-shell]" >&2; exit 1 ;;
+        all|cli|daemon|gui) COMPONENT="$1"; shift ;;
+        *) echo "Usage: install.sh [all|cli|daemon|gui] [--channel stable|beta] [--dry-run] [--skip-shell]" >&2; exit 1 ;;
     esac
 done
 
@@ -197,6 +201,7 @@ resolve_asset() {
     sha256=$(printf '%s\n' "$checksums" | awk -v f="$component-$VERSION-$RID.$ext" '$2 == f { print $1; exit }')
     if [ -z "$sha256" ]; then
         echo "  Error: No checksum found for $component-$VERSION-$RID.$ext" >&2
+        echo "  Release $VERSION publishes no $component binary for $RID." >&2
         return 1
     fi
 
@@ -275,13 +280,17 @@ if [ "$DRY_RUN" = false ]; then
     validate_install_dir_for_path "$INSTALL_DIR"
 fi
 
-# Download requested components
+# Download requested components. `all` is the core set; the GUI is opt-in so a
+# headless host never receives a desktop binary it cannot use.
 SUCCESS=true
 if [[ "$COMPONENT" == "all" || "$COMPONENT" == "cli" ]]; then
     download_component "netclaw" || SUCCESS=false
 fi
 if [[ "$COMPONENT" == "all" || "$COMPONENT" == "daemon" ]]; then
     download_component "netclawd" || SUCCESS=false
+fi
+if [[ "$COMPONENT" == "gui" ]]; then
+    download_component "netclaw-gui" || SUCCESS=false
 fi
 
 if [ "$SUCCESS" = false ]; then
