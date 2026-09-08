@@ -2431,14 +2431,29 @@ internal sealed class ControllableWorkingContextSnapshotProvider : IWorkingConte
 
 internal sealed class RecordingSessionLifecycleObserver : ISessionLifecycleObserver
 {
+    private readonly object _gate = new();
+    private readonly List<SessionOutput> _outputs = [];
+
     public List<string> ActivatedSessionIds { get; } = [];
     public List<string> DeactivatedSessionIds { get; } = [];
+
+    /// <summary>Every output reported through <see cref="OnOutput"/>, in order.</summary>
+    public IReadOnlyList<SessionOutput> Outputs
+    {
+        get
+        {
+            lock (_gate)
+                return _outputs.ToList();
+        }
+    }
 
     public void OnSessionActivated(SessionId sessionId, ChannelType channelType)
         => ActivatedSessionIds.Add(sessionId.Value);
 
     public void OnOutput(SessionOutput output)
     {
+        lock (_gate)
+            _outputs.Add(output);
     }
 
     public void OnSessionDeactivated(SessionId sessionId)

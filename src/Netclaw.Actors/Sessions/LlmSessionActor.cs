@@ -5052,6 +5052,12 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
         _subscribers.Emit(output, requiredFlag);
         _logActor?.Tell(output);
         _observerActor?.Tell(output);
+        // The lifecycle observer (the daemon's session catalog) must see every
+        // output, including ones emitted while no client is attached — a REST
+        // rename or a title generated after the operator left. Reporting from
+        // here, not from a client pipeline, also means one report per output
+        // no matter how many clients share the session.
+        _lifecycleObserver?.OnOutput(output);
     }
 
     private async Task PersistApprovalCandidatesAsync(

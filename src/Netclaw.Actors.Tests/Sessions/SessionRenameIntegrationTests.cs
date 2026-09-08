@@ -30,6 +30,7 @@ public class SessionRenameIntegrationTests : LlmSessionTestBase
 {
     private readonly FakeChatClient _chatClient = new();
     private readonly FakeTimeProvider _timeProvider = new(DateTimeOffset.Parse("2026-08-31T12:00:00Z"));
+    private readonly RecordingSessionLifecycleObserver _lifecycleObserver = new();
 
     public SessionRenameIntegrationTests(ITestOutputHelper output) : base(output) { }
 
@@ -73,6 +74,7 @@ public class SessionRenameIntegrationTests : LlmSessionTestBase
         services.AddSingleton<TimeProvider>(_timeProvider);
         services.AddSingleton<IWorkingContextSnapshotProvider>(new ControllableWorkingContextSnapshotProvider());
         services.AddSingleton<ISessionPipeline>(new UnusedSessionPipeline());
+        services.AddSingleton<ISessionLifecycleObserver>(_lifecycleObserver);
     }
 
     private async Task SendMessageAsync(
@@ -142,6 +144,31 @@ public class SessionRenameIntegrationTests : LlmSessionTestBase
         var joined = await JoinSessionAsync(
             sessionManager, CreateTestProbe("rename-rejoin"), sessionId);
         Assert.Equal("My manual title", joined.Title);
+    }
+
+    [Fact]
+    public async Task Rename_with_no_subscriber_still_reaches_the_lifecycle_observer()
+    {
+        // The daemon's session catalog is the lifecycle observer. A rename
+        // from the REST API lands on a session with no attached client, so
+        // the title output must reach the observer from the actor itself,
+        // not through a client pipeline that does not exist.
+        var sessionId = new SessionId("signalr/rename-unattached");
+        var sessionManager = ActorRegistry.Get<SessionManagerActorKey>();
+
+        var reply = await sessionManager.Ask<object>(new RenameSession
+        {
+            SessionId = sessionId,
+            Title = "Renamed from the API"
+        }, TimeSpan.FromSeconds(3), cancellationToken: TestContext.Current.CancellationToken);
+        Assert.IsType<CommandAck>(reply);
+
+        // The ack follows the persist callback that emits the output, so the
+        // observer has seen it by the time the ask completes.
+        var titleOutput = Assert.Single(
+            _lifecycleObserver.Outputs.OfType<SessionTitleOutput>(),
+            o => o.SessionId == sessionId);
+        Assert.Equal("Renamed from the API", titleOutput.Title);
     }
 
     [Fact]

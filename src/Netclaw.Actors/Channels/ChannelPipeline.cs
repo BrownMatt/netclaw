@@ -271,20 +271,12 @@ public sealed class SessionPipeline : ISessionPipeline
             }).ObservingFault());
 
         // Outbound: pre-materialized subscriber → kill switch → exposed Source.
-        // When a lifecycle observer is registered, tap the stream so every output
-        // is reported regardless of which channel materializes the session.
+        // The lifecycle observer is NOT tapped here: the session actor reports
+        // every output to it at the emit point, so outputs emitted with no
+        // client attached are still observed, and a session shared by two
+        // clients is observed once, not once per pipeline.
         var outputSource = responseSource
             .Via(killSwitch.Flow<SessionOutput>());
-
-        if (_lifecycleObserver is not null)
-        {
-            var observer = _lifecycleObserver;
-            outputSource = outputSource.Select(output =>
-            {
-                observer.OnOutput(output);
-                return output;
-            });
-        }
 
         // Notify observer that the session is active again (or newly created).
         _lifecycleObserver?.OnSessionActivated(sessionId, options.ChannelType);

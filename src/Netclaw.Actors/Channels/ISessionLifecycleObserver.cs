@@ -21,8 +21,10 @@ public interface ISessionLifecycleObserver
     void OnSessionActivated(SessionId sessionId, ChannelType channelType);
 
     /// <summary>
-    /// Called for every <see cref="SessionOutput"/> emitted by the session.
-    /// Implementations must be fast — this runs synchronously in the Akka.Streams pipeline.
+    /// Called for every <see cref="SessionOutput"/> emitted by the session,
+    /// whether or not a client is attached. Runs synchronously on the session
+    /// actor's thread at the emit point, exactly once per output.
+    /// Implementations must be fast and must not throw.
     /// </summary>
     void OnOutput(SessionOutput output);
 

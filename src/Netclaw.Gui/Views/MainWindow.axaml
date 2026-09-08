@@ -4,14 +4,41 @@
         xmlns:views="using:Netclaw.Gui.Views"
         x:Class="Netclaw.Gui.Views.MainWindow"
         x:DataType="vm:MainWindowViewModel"
-        Title="Netclaw"
+        Title="{Binding WindowTitle}"
         Width="1100" Height="720">
+
+  <Window.KeyBindings>
+    <!-- Window-level so the shortcut works with focus anywhere. -->
+    <KeyBinding Gesture="Ctrl+N" Command="{Binding NewSessionCommand}" />
+  </Window.KeyBindings>
+
+  <Window.Styles>
+    <!-- The active row highlight is driven by IsActive (viewmodel state),
+         not by ListBox selection, so it survives a list reload and never
+         shows twice across the pinned and unpinned lists. The accent color
+         is fixed until Phase 8 makes the shell theme-aware. -->
+    <Style Selector="Border.sessionRow">
+      <Setter Property="BorderThickness" Value="3,0,0,0" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="Padding" Value="6,2,0,2" />
+      <Setter Property="Margin" Value="0,2" />
+    </Style>
+    <Style Selector="Border.sessionRow.active">
+      <Setter Property="BorderBrush" Value="#8B5CF6" />
+    </Style>
+    <Style Selector="Border.sessionRow.active TextBlock.title">
+      <Setter Property="FontWeight" Value="Bold" />
+    </Style>
+  </Window.Styles>
 
   <Window.Resources>
     <!-- Shared row template for both session sections. Right-click opens
-         the management menu; Pin/Unpin label follows the pin state. -->
+         the management menu; Pin/Unpin label follows the pin state. The
+         tooltip carries the absolute times behind the relative texts. -->
     <DataTemplate x:Key="SessionRowTemplate" DataType="vm:SessionListItemViewModel">
-      <StackPanel Margin="0,2" Background="Transparent">
+      <Border Classes="sessionRow" Classes.active="{Binding IsActive}"
+              Background="Transparent" ToolTip.Tip="{Binding TimesTooltip}">
+      <StackPanel Background="Transparent">
         <StackPanel.ContextMenu>
           <ContextMenu>
             <MenuItem Header="Rename"
@@ -28,9 +55,14 @@
                       CommandParameter="{Binding}" />
           </ContextMenu>
         </StackPanel.ContextMenu>
-        <TextBlock Text="{Binding DisplayTitle}" TextTrimming="CharacterEllipsis" />
-        <TextBlock Text="{Binding Channel}" Opacity="0.5" FontSize="11" />
+        <TextBlock Classes="title" Text="{Binding DisplayTitle}" TextTrimming="CharacterEllipsis" />
+        <StackPanel Orientation="Horizontal" Spacing="6">
+          <TextBlock Text="{Binding Channel}" Opacity="0.5" FontSize="11" />
+          <TextBlock Text="{Binding LastActivityDisplay}" Opacity="0.5" FontSize="11" />
+        </StackPanel>
+        <TextBlock Text="{Binding CreatedDisplay}" Opacity="0.5" FontSize="11" />
       </StackPanel>
+      </Border>
     </DataTemplate>
   </Window.Resources>
 
@@ -40,7 +72,23 @@
          confirmation-driven updates (the list refreshes after the daemon
          acks; a rejection shows ActionError and keeps the list). -->
     <DockPanel Grid.Column="0" Margin="0,0,8,0">
-      <TextBlock DockPanel.Dock="Top" Text="Sessions" FontWeight="Bold" Margin="4,0,0,6" />
+      <!-- Header: title, sort control, new-session button (Ctrl+N). -->
+      <Grid DockPanel.Dock="Top" ColumnDefinitions="*,Auto,Auto" Margin="4,0,0,6">
+        <TextBlock Grid.Column="0" Text="Sessions" FontWeight="Bold" VerticalAlignment="Center" />
+        <ComboBox Grid.Column="1" FontSize="11" Padding="6,2" MinHeight="0" Margin="0,0,4,0"
+                  ToolTip.Tip="Sort order"
+                  ItemsSource="{x:Static vm:SessionListViewModel.SortOptions}"
+                  SelectedItem="{Binding SessionList.SelectedSortOption}">
+          <ComboBox.ItemTemplate>
+            <DataTemplate DataType="vm:SessionSortOption">
+              <TextBlock Text="{Binding Label}" FontSize="11" />
+            </DataTemplate>
+          </ComboBox.ItemTemplate>
+        </ComboBox>
+        <Button Grid.Column="2" Content="+ New" FontSize="11" Padding="6,2"
+                ToolTip.Tip="New session (Ctrl+N)"
+                Command="{Binding NewSessionCommand}" />
+      </Grid>
 
       <!-- Rename dialog -->
       <Border DockPanel.Dock="Top" IsVisible="{Binding SessionList.IsRenameOpen}"
@@ -226,7 +274,18 @@
         </Grid>
       </StackPanel>
 
-      <!-- History: implicit DataTemplates select the visual per block type -->
+      <!-- History: implicit DataTemplates select the visual per block type.
+           The Panel overlays the attach loading state on the history, so a
+           slow replay never looks like an empty session. -->
+      <Panel>
+      <Border IsVisible="{Binding IsLoadingSession}" ZIndex="1"
+              HorizontalAlignment="Center" VerticalAlignment="Center"
+              Padding="16,10" CornerRadius="6" Background="#22000000">
+        <StackPanel Spacing="8" MinWidth="180">
+          <TextBlock Text="Loading session..." HorizontalAlignment="Center" Opacity="0.8" />
+          <ProgressBar IsIndeterminate="True" />
+        </StackPanel>
+      </Border>
       <ScrollViewer x:Name="HistoryScroll">
         <ItemsControl ItemsSource="{Binding Chat.Blocks}">
           <ItemsControl.DataTemplates>
@@ -309,6 +368,7 @@
           </ItemsControl.DataTemplates>
         </ItemsControl>
       </ScrollViewer>
+      </Panel>
 
     </DockPanel>
 

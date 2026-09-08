@@ -26,6 +26,9 @@ public interface IDaemonSessionService
 
     Task<string> EnsureSessionAsync(CancellationToken cancellationToken = default);
 
+    /// <summary>Creates a new daemon session and binds this connection to it.</summary>
+    Task<string> CreateSessionAsync(CancellationToken cancellationToken = default);
+
     Task<string> ResumeSessionAsync(string sessionId, CancellationToken cancellationToken = default);
 
     Task SendAsync(string text, CancellationToken cancellationToken = default);
@@ -97,6 +100,9 @@ public sealed class DaemonSessionService : IDaemonSessionService
 
     public Task<string> EnsureSessionAsync(CancellationToken cancellationToken = default)
         => _client.EnsureSessionAsync(DaemonClient.TuiChannelType, cancellationToken);
+
+    public Task<string> CreateSessionAsync(CancellationToken cancellationToken = default)
+        => _client.CreateSessionAsync(DaemonClient.TuiChannelType, cancellationToken);
 
     public Task<string> ResumeSessionAsync(string sessionId, CancellationToken cancellationToken = default)
         => _client.ResumeSessionAsync(sessionId, DaemonClient.TuiChannelType, cancellationToken);

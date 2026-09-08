@@ -32,7 +32,7 @@ public sealed class App : Application
 
             desktop.MainWindow = new MainWindow
             {
-                DataContext = new MainWindowViewModel(service, new AvaloniaUiDispatcher(), endpoint),
+                DataContext = new MainWindowViewModel(service, new AvaloniaUiDispatcher(), endpoint, TimeProvider.System),
             };
         }
 

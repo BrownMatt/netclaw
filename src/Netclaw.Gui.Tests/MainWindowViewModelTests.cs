@@ -3,6 +3,7 @@
 //      Copyright (C) 2026 - 2026 Petabridge, LLC <https://petabridge.com>
 // </copyright>
 // -----------------------------------------------------------------------
+using Microsoft.Extensions.Time.Testing;
 using Netclaw.Actors.Protocol;
 using Netclaw.Client;
 using Netclaw.Gui.Services;
@@ -27,7 +28,7 @@ public sealed class MainWindowViewModelTests : IDisposable
 
     private MainWindowViewModel CreateViewModel()
     {
-        _vm = new MainWindowViewModel(_service, new InlineDispatcher(), "http://127.0.0.1:5199");
+        _vm = new MainWindowViewModel(_service, new InlineDispatcher(), "http://127.0.0.1:5199", new FakeTimeProvider());
         return _vm;
     }
 
@@ -167,6 +168,8 @@ public sealed class MainWindowViewModelTests : IDisposable
 
         Assert.Null(vm.Chat);
         Assert.Contains("deleted", vm.Status);
+        Assert.False(vm.IsLoadingSession);
+        Assert.DoesNotContain(vm.SessionList.Sessions, s => s.IsActive);
     }
 
     [Fact]
@@ -290,6 +293,193 @@ public sealed class MainWindowViewModelTests : IDisposable
         }
     }
 
+    // ── Phase 6: new session, periodic refresh, loading state, title ──
+
+    private static SessionCatalogEntryDto Catalog(string sessionId, string? title = null) => new()
+    {
+        PersistenceId = $"session-{sessionId}",
+        Channel = "tui",
+        Status = "active",
+        TurnCount = 1,
+        CreatedAt = 1,
+        LastActivity = 2,
+        Title = title
+    };
+
+    private async Task<MainWindowViewModel> ConnectedViewModelAsync()
+    {
+        _service.ConnectGate.SetResult();
+        var vm = CreateViewModel();
+        await WaitForChatAsync(vm);
+        await _service.SessionsListed.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        return vm;
+    }
+
+    [Fact]
+    public async Task New_session_adopts_the_created_id_and_marks_it_active()
+    {
+        var vm = await ConnectedViewModelAsync();
+        var original = vm.Chat!.SessionId;
+        _service.Sessions = [Catalog(original), Catalog("signalr/new-1")];
+
+        await vm.NewSessionCommand.ExecuteAsync(null);
+
+        Assert.Equal(1, _service.CreateCount);
+        Assert.Equal("signalr/new-1", vm.Chat!.SessionId);
+        Assert.Empty(vm.Chat.Blocks);
+        Assert.Equal("signalr/new-1", Assert.Single(vm.SessionList.Sessions, s => s.IsActive).SessionId);
+        Assert.StartsWith("signalr/new-1 - Netclaw", vm.WindowTitle);
+
+        // The fresh session's join ends the loading state with an empty history.
+        Assert.True(vm.IsLoadingSession);
+        _service.Outputs.OnNext(new SessionJoined { SessionId = new SessionId("signalr/new-1"), TurnCount = 0, RecentMessages = [] });
+        Assert.False(vm.IsLoadingSession);
+        Assert.Empty(vm.Chat.Blocks);
+    }
+
+    [Fact]
+    public async Task Failed_new_session_keeps_the_current_session()
+    {
+        var vm = await ConnectedViewModelAsync();
+        var original = vm.Chat!.SessionId;
+        _service.CreateFailure = new InvalidOperationException("ingress closed");
+
+        await vm.NewSessionCommand.ExecuteAsync(null);
+
+        Assert.Equal(original, vm.Chat!.SessionId);
+        Assert.Contains("New session failed", vm.Status);
+        Assert.Contains("ingress closed", vm.Status);
+    }
+
+    [Fact]
+    public async Task Timer_tick_refreshes_only_while_connected_and_idle()
+    {
+        var vm = CreateViewModel();
+
+        // Not connected yet: a tick sends nothing.
+        await vm.OnSessionListTimerTick();
+        Assert.Equal(0, _service.ListCount);
+
+        _service.ConnectGate.SetResult();
+        await WaitForChatAsync(vm);
+        await _service.SessionsListed.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        var baseline = _service.ListCount;
+
+        await vm.OnSessionListTimerTick();
+        Assert.Equal(baseline + 1, _service.ListCount);
+
+        // An in-flight refresh blocks the next tick until it completes.
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _service.ListGate = gate;
+        var inFlight = vm.OnSessionListTimerTick();
+        await vm.OnSessionListTimerTick();
+        Assert.Equal(baseline + 2, _service.ListCount);
+
+        _service.ListGate = null;
+        gate.SetResult();
+        await inFlight.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        await vm.OnSessionListTimerTick();
+        Assert.Equal(baseline + 3, _service.ListCount);
+    }
+
+    [Fact]
+    public async Task Loading_state_spans_the_attach_until_the_replay_arrives()
+    {
+        var vm = await ConnectedViewModelAsync();
+        Assert.True(vm.IsLoadingSession);
+
+        _service.Outputs.OnNext(new SessionJoined
+        {
+            SessionId = new SessionId(_service.SessionIdToReturn),
+            TurnCount = 0,
+            RecentMessages = []
+        });
+
+        Assert.False(vm.IsLoadingSession);
+        Assert.Empty(vm.Chat!.Blocks);
+    }
+
+    [Fact]
+    public async Task Join_that_arrives_before_the_adopt_still_renders_and_ends_loading()
+    {
+        // The daemon pushes SessionJoined while the ensure call is in flight:
+        // the snapshot reaches the shell before Chat exists.
+        var vm = CreateViewModel();
+        _service.Outputs.OnNext(new SessionJoined
+        {
+            SessionId = new SessionId(_service.SessionIdToReturn),
+            TurnCount = 1,
+            RecentMessages = [new ChatMessageDto("user", "early replay")]
+        });
+        Assert.Null(vm.Chat);
+
+        _service.ConnectGate.SetResult();
+        await WaitForChatAsync(vm);
+
+        Assert.False(vm.IsLoadingSession);
+        var block = Assert.IsType<UserMessageBlockViewModel>(Assert.Single(vm.Chat!.Blocks));
+        Assert.Equal("early replay", block.Text);
+    }
+
+    [Fact]
+    public async Task Failed_attach_ends_the_loading_state()
+    {
+        var vm = await ConnectedViewModelAsync();
+        Assert.True(vm.IsLoadingSession);
+        _service.ResumeFailure = new InvalidOperationException("no such session");
+
+        await vm.AttachSessionCommand.ExecuteAsync(new SessionListItemViewModel
+        {
+            SessionId = "signalr/missing",
+            Channel = "tui"
+        });
+
+        Assert.False(vm.IsLoadingSession);
+        Assert.Contains("Attach failed", vm.Status);
+    }
+
+    [Fact]
+    public async Task Connection_loss_ends_the_loading_state_and_suffixes_the_title()
+    {
+        var vm = await ConnectedViewModelAsync();
+        Assert.True(vm.IsLoadingSession);
+        Assert.EndsWith("- Netclaw", vm.WindowTitle);
+
+        _service.Connections.OnNext(new DaemonConnectionEvent(
+            DaemonConnectionState.Disconnected, "http://127.0.0.1:5199", "gone"));
+
+        Assert.False(vm.IsLoadingSession);
+        Assert.EndsWith("Netclaw (disconnected)", vm.WindowTitle);
+
+        _service.Connections.OnNext(new DaemonConnectionEvent(
+            DaemonConnectionState.Connected, "http://127.0.0.1:5199", "back"));
+
+        Assert.EndsWith("- Netclaw", vm.WindowTitle);
+    }
+
+    [Fact]
+    public async Task Window_title_follows_the_attached_session_title()
+    {
+        _service.Sessions = [Catalog("signalr/fake-session", "Deploy checklist")];
+        var vm = await ConnectedViewModelAsync();
+
+        Assert.Equal("Deploy checklist - Netclaw", vm.WindowTitle);
+
+        _service.Outputs.OnNext(new SessionTitleOutput("Renamed live")
+        {
+            SessionId = new SessionId("signalr/fake-session")
+        });
+        Assert.Equal("Renamed live - Netclaw", vm.WindowTitle);
+    }
+
+    [Fact]
+    public async Task Window_title_uses_the_id_when_the_session_has_no_title()
+    {
+        var vm = await ConnectedViewModelAsync();
+
+        Assert.Equal("signalr/fake-session - Netclaw", vm.WindowTitle);
+    }
+
     private static ToolInteractionRequest Interaction(string sessionId, string callId) => new()
     {
         SessionId = new SessionId(sessionId),
@@ -359,8 +549,30 @@ public sealed class MainWindowViewModelTests : IDisposable
             return Task.FromResult(SessionIdToReturn);
         }
 
+        public int CreateCount { get; private set; }
+
+        public Exception? CreateFailure { get; set; }
+
+        public Exception? ResumeFailure { get; set; }
+
+        /// <summary>When set, a list request waits on it (in-flight simulation).</summary>
+        public TaskCompletionSource? ListGate { get; set; }
+
+        public Task<string> CreateSessionAsync(CancellationToken cancellationToken = default)
+        {
+            if (CreateFailure is { } failure)
+                return Task.FromException<string>(failure);
+
+            CreateCount++;
+            SessionIdToReturn = $"signalr/new-{CreateCount}";
+            return Task.FromResult(SessionIdToReturn);
+        }
+
         public Task<string> ResumeSessionAsync(string sessionId, CancellationToken cancellationToken = default)
         {
+            if (ResumeFailure is { } failure)
+                return Task.FromException<string>(failure);
+
             SessionIdToReturn = sessionId;
             return Task.FromResult(sessionId);
         }
@@ -385,11 +597,13 @@ public sealed class MainWindowViewModelTests : IDisposable
         public Task RemoveFolderGrantAsync(string path, CancellationToken cancellationToken = default)
             => Task.CompletedTask;
 
-        public Task<List<SessionCatalogEntryDto>> ListSessionsAsync(CancellationToken cancellationToken = default)
+        public async Task<List<SessionCatalogEntryDto>> ListSessionsAsync(CancellationToken cancellationToken = default)
         {
             ListCount++;
             SessionsListed.TrySetResult();
-            return Task.FromResult(Sessions);
+            if (ListGate is { } gate)
+                await gate.Task.WaitAsync(cancellationToken);
+            return Sessions;
         }
 
         public Task<DaemonApi.SessionAttachmentUploadResultDto> UploadAttachmentAsync(

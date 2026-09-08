@@ -34,6 +34,7 @@ public sealed record PendingAttachmentChip(string AttachmentId, string FileName)
 /// </summary>
 public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
 {
+    private const string ApplicationName = "Netclaw";
     private static readonly TimeSpan ConnectRetryDelay = TimeSpan.FromSeconds(3);
 
     private readonly IDaemonSessionService _service;
@@ -45,6 +46,17 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     private readonly IDisposable _outputSubscription;
     private readonly IDisposable _connectionSubscription;
     private bool _sessionEnsured;
+    // Transport state as the shell knows it: set by the connect loop, the
+    // attach path, and connection events. Drives the title suffix and the
+    // periodic list refresh.
+    private bool _connected;
+    private bool _listRefreshing;
+    // The daemon pushes SessionJoined on the output stream while the
+    // ensure/resume call is still in flight, so the snapshot can land
+    // before the chat viewmodel for that session exists. Keep the latest
+    // per session id and apply it when the session is adopted; without
+    // this the replay is dropped and the loading state never ends.
+    private readonly Dictionary<string, SessionJoined> _earlyJoins = new(StringComparer.Ordinal);
 
     [ObservableProperty]
     private string _status = "Connecting...";
@@ -59,7 +71,33 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     [NotifyPropertyChangedFor(nameof(HasQueued))]
     private int _queuedCount;
 
+    /// <summary>
+    /// True from the start of an attach until the session replay arrives or
+    /// the attach fails, so a slow replay and an empty session look different.
+    /// </summary>
+    [ObservableProperty]
+    private bool _isLoadingSession;
+
     public bool HasQueued => QueuedCount > 0;
+
+    /// <summary>
+    /// "&lt;session title&gt; - Netclaw", with the id when the session has no
+    /// title, and a "(disconnected)" suffix while the transport is down.
+    /// </summary>
+    public string WindowTitle
+    {
+        get
+        {
+            var state = _connected ? string.Empty : " (disconnected)";
+            if (Chat is null)
+                return $"{ApplicationName}{state}";
+
+            var row = SessionList.Sessions.FirstOrDefault(s =>
+                string.Equals(s.SessionId, Chat.SessionId, StringComparison.Ordinal));
+            var name = row?.DisplayTitle ?? Chat.SessionId;
+            return $"{name} - {ApplicationName}{state}";
+        }
+    }
 
     public SessionListViewModel SessionList { get; }
 
@@ -67,17 +105,23 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
 
     public ObservableCollection<PendingAttachmentChip> PendingAttachments { get; } = [];
 
-    public MainWindowViewModel(IDaemonSessionService service, IUiDispatcher dispatcher, string endpoint)
+    public MainWindowViewModel(
+        IDaemonSessionService service,
+        IUiDispatcher dispatcher,
+        string endpoint,
+        TimeProvider timeProvider)
     {
         _service = service;
         _dispatcher = dispatcher;
         _endpoint = endpoint;
-        SessionList = new SessionListViewModel(new SessionManagementActions(
-            Rename: (sessionId, title) => _service.RenameSessionAsync(sessionId, title),
-            SetPinned: (sessionId, pinned) => _service.SetSessionFlagsAsync(sessionId, pinned: pinned),
-            SetArchived: (sessionId, archived) => _service.SetSessionFlagsAsync(sessionId, archived: archived),
-            Delete: sessionId => _service.DeleteSessionAsync(sessionId),
-            Refresh: RefreshSessionListAsync));
+        SessionList = new SessionListViewModel(
+            new SessionManagementActions(
+                Rename: (sessionId, title) => _service.RenameSessionAsync(sessionId, title),
+                SetPinned: (sessionId, pinned) => _service.SetSessionFlagsAsync(sessionId, pinned: pinned),
+                SetArchived: (sessionId, archived) => _service.SetSessionFlagsAsync(sessionId, archived: archived),
+                Delete: sessionId => _service.DeleteSessionAsync(sessionId),
+                Refresh: RefreshSessionListAsync),
+            timeProvider);
         Diagnostics = new DiagnosticsPaneViewModel(new DiagnosticsActions(
             DaemonLogTail: tail => _service.GetDaemonLogTailAsync(tail),
             SessionLogTail: (sessionId, tail) => _service.GetSessionLogTailAsync(sessionId, tail),
@@ -99,6 +143,23 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     /// <summary>The view's ~80 ms timer calls this to flush streamed deltas.</summary>
     public void FlushStreamingDeltas() => Chat?.FlushStreamingDeltas();
 
+    /// <summary>
+    /// The view's 5 s timer calls this. The list refreshes only while
+    /// connected and never while a refresh is in flight, so the catalog sees
+    /// at most one request per interval per GUI. Returns the refresh task
+    /// (or a completed task when the tick was skipped) so tests can await
+    /// the in-flight guard instead of polling.
+    /// </summary>
+    public Task OnSessionListTimerTick()
+    {
+        if (!_connected || _listRefreshing)
+            return Task.CompletedTask;
+
+        return RefreshSessionListAsync();
+    }
+
+    partial void OnChatChanged(ChatSessionViewModel? value) => OnPropertyChanged(nameof(WindowTitle));
+
     [RelayCommand]
     private async Task SendAsync()
     {
@@ -119,6 +180,29 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         Status = $"Queued ({_queue.Count}) - waiting for daemon at {_endpoint}";
     }
 
+    /// <summary>
+    /// Creates a session through the daemon and attaches it. A failure keeps
+    /// the current session and shows the reason.
+    /// </summary>
+    [RelayCommand]
+    private async Task NewSessionAsync()
+    {
+        try
+        {
+            var sessionId = await _service.CreateSessionAsync();
+            AdoptSession(sessionId);
+            _sessionEnsured = true;
+            _connected = true;
+            Status = $"Connected - {_endpoint}";
+            await FlushQueueAsync();
+            await RefreshSessionListAsync();
+        }
+        catch (Exception ex)
+        {
+            Status = $"New session failed: {ex.Message}";
+        }
+    }
+
     [RelayCommand]
     private async Task AttachSessionAsync(SessionListItemViewModel? item)
     {
@@ -133,6 +217,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
             // the transport and a session — without this, a send after a
             // deleted-session recovery would queue forever.
             _sessionEnsured = true;
+            _connected = true;
             Status = $"Connected - {_endpoint}";
             // A queued message (e.g. from a send the daemon rejected) flushes
             // on re-attach too, not only on transport reconnect.
@@ -143,6 +228,7 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         }
         catch (Exception ex)
         {
+            IsLoadingSession = false;
             Status = $"Attach failed: {ex.Message}";
         }
     }
@@ -247,7 +333,9 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
         {
             if (Chat?.SessionId != sessionId)
                 AdoptSession(sessionId);
+            _connected = true;
             Status = $"Connected - {_endpoint}";
+            OnPropertyChanged(nameof(WindowTitle));
         });
 
         await FlushQueueAsync();
@@ -283,21 +371,31 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
 
     private async Task RefreshSessionListAsync()
     {
+        _listRefreshing = true;
         try
         {
             var entries = await _service.ListSessionsAsync();
-            _dispatcher.Post(() => SessionList.Load(entries));
+            _dispatcher.Post(() =>
+            {
+                SessionList.Load(entries);
+                // A rename by another client changes the attached row's title.
+                OnPropertyChanged(nameof(WindowTitle));
+            });
         }
         catch (Exception ex)
         {
-            // The list refreshes again on the next reconnect; the chat pane
-            // stays fully usable without it. Surface the failure only when
-            // the pane would otherwise be inexplicably blank.
+            // The list refreshes again on the next tick or reconnect; the chat
+            // pane stays fully usable without it. Surface the failure only
+            // when the pane would otherwise be inexplicably blank.
             _dispatcher.Post(() =>
             {
                 if (SessionList.Sessions.Count == 0)
                     Status = $"Session list unavailable: {ex.Message}";
             });
+        }
+        finally
+        {
+            _dispatcher.Post(() => _listRefreshing = false);
         }
     }
 
@@ -311,11 +409,27 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
             sessionId,
             (callId, key) => _service.RespondToInteractionAsync(callId, key),
             selector);
+        SessionList.SetActive(sessionId);
         PendingAttachments.Clear();
         Diagnostics.SetAttachedSession(sessionId);
         // Cleared until the join snapshot reports the authoritative override.
         Diagnostics.SetModelOverride(null, null);
+        // The replay (SessionJoined) ends the loading state; every join,
+        // including a fresh session, emits one. A snapshot that arrived
+        // ahead of this adopt applies at once.
+        if (_earlyJoins.Remove(sessionId, out var joined))
+            ApplyJoined(joined);
+        else
+            IsLoadingSession = true;
+        OnPropertyChanged(nameof(WindowTitle));
         _ = LoadModelCatalogAsync(selector);
+    }
+
+    private void ApplyJoined(SessionJoined joined)
+    {
+        Chat?.LoadReplay(joined);
+        IsLoadingSession = false;
+        Diagnostics.SetModelOverride(joined.ModelOverrideProvider, joined.ModelOverrideId);
     }
 
     private async Task LoadModelCatalogAsync(ModelSelectorViewModel selector)
@@ -392,16 +506,22 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
     {
         // Live title events update the list for any session.
         if (output is SessionTitleOutput title)
+        {
             SessionList.ApplyTitle(output.SessionId.Value, title.Title);
+            OnPropertyChanged(nameof(WindowTitle));
+        }
 
         if (output is SessionDeletedOutput)
         {
+            _earlyJoins.Remove(output.SessionId.Value);
             // The attached session's chat pane clears; the list refreshes
             // for a deletion of any session (another client may have done it).
             if (Chat is not null && string.Equals(Chat.SessionId, output.SessionId.Value, StringComparison.Ordinal))
             {
                 Chat = null;
                 _sessionEnsured = false;
+                IsLoadingSession = false;
+                SessionList.SetActive(null);
                 Status = "Session deleted.";
                 Diagnostics.SetAttachedSession(null);
             }
@@ -410,18 +530,23 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
             return;
         }
 
-        // Everything else renders only for the attached session — a
-        // detached session's events (approvals included) never reach a
-        // card the operator could answer.
-        if (Chat is null || !string.Equals(Chat.SessionId, output.SessionId.Value, StringComparison.Ordinal))
-            return;
+        var attached = Chat is not null
+            && string.Equals(Chat.SessionId, output.SessionId.Value, StringComparison.Ordinal);
 
         if (output is SessionJoined joined)
         {
-            Chat.LoadReplay(joined);
-            Diagnostics.SetModelOverride(joined.ModelOverrideProvider, joined.ModelOverrideId);
+            if (attached)
+                ApplyJoined(joined);
+            else
+                _earlyJoins[output.SessionId.Value] = joined;
             return;
         }
+
+        // Everything else renders only for the attached session — a
+        // detached session's events (approvals included) never reach a
+        // card the operator could answer.
+        if (Chat is null || !attached)
+            return;
 
         if (output is ModelOverrideOutput overrideOutput)
             Diagnostics.SetModelOverride(overrideOutput.Provider, overrideOutput.ModelId);
@@ -443,6 +568,13 @@ public sealed partial class MainWindowViewModel : ObservableObject, IDisposable
             DaemonConnectionState.Disconnected => $"Disconnected - {evt.Message}",
             _ => evt.Message,
         };
+
+        _connected = evt.State == DaemonConnectionState.Connected;
+        // A replay cannot arrive on a dead transport; the reconnect path
+        // adopts the session again and restarts the loading state.
+        if (!_connected)
+            IsLoadingSession = false;
+        OnPropertyChanged(nameof(WindowTitle));
 
         if (evt.State == DaemonConnectionState.Connected && _sessionEnsured)
         {

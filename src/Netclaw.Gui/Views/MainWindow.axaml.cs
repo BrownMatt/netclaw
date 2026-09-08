@@ -37,7 +37,14 @@ public sealed partial class MainWindow : Window
         _diagnosticsTimer = new DispatcherTimer(
             TimeSpan.FromSeconds(DiagnosticsPaneViewModel.RefreshIntervalSeconds),
             DispatcherPriority.Background,
-            (_, _) => (DataContext as MainWindowViewModel)?.Diagnostics.OnRefreshTimerTick());
+            (_, _) =>
+            {
+                var vm = DataContext as MainWindowViewModel;
+                vm?.Diagnostics.OnRefreshTimerTick();
+                // The session list shares the interval; its own guards skip
+                // the request while disconnected or while one is in flight.
+                _ = vm?.OnSessionListTimerTick();
+            });
         _diagnosticsTimer.Start();
         HistoryScroll.ScrollChanged += OnHistoryScrollChanged;
     }
@@ -64,7 +71,16 @@ public sealed partial class MainWindow : Window
         // Two list boxes (pinned / unpinned) share this handler, so read the
         // clicked item from the event instead of a shared bound property.
         if (ViewModel is { } vm && e.AddedItems is [SessionListItemViewModel selected, ..])
+        {
             _ = vm.AttachSessionCommand.ExecuteAsync(selected);
+            // The active row highlight comes from the viewmodel's IsActive
+            // mark. The ListBox selection is transient: clearing it keeps the
+            // pinned and unpinned lists from showing two highlights, and a
+            // list reload cannot drop the mark. Posted so the clear does not
+            // re-enter this handler mid-selection.
+            if (sender is ListBox list)
+                Dispatcher.UIThread.Post(() => list.SelectedItem = null);
+        }
     }
 
     private async void OnAttachFileClick(object? sender, RoutedEventArgs e)
